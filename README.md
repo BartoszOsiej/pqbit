@@ -8,7 +8,7 @@ Part of [Hartwell Labs](https://bartoszosiej.github.io/) · Founder: Bartosz Osi
 [![Rust](https://img.shields.io/badge/Rust-1.97+-DEA584?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![CI](https://github.com/BartoszOsiej/pqbit/actions/workflows/ci.yml/badge.svg)](https://github.com/BartoszOsiej/pqbit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-4%20passing-brightgreen?style=flat-square)](#verification)
+[![Tests](https://img.shields.io/badge/tests-9%20passing-brightgreen?style=flat-square)](#verification)
 
 ## Why
 
@@ -31,13 +31,26 @@ Not "a faster Bitcoin". Not "a better store of value". One thesis, executed clea
 
 ## Status
 
-**Phase 1 — core primitives (active).** This repository currently provides:
+**Phase 2 — testnet node (active).** The repository currently provides:
 
 - `pqbit-core` — quantum-resistant transaction model: TxIn/TxOut/Transaction, canonical sighash preimage, PQ signature verification via [bitcoinpqc](https://crates.io/crates/bitcoinpqc) (ML-DSA-44, SLH-DSA-SHA2-128s)
-- Deterministic sighash scheme over the PQ preimage (double-SHA-256)
-- Keypair generation, signing, verification round-trips — **4/4 tests passing**
+- `pqbit-node` — testnet chain engine: blocks, SHA-256d PoW (leading-zero-bits difficulty), coinbase with height commitment, **UTXO set with ML-DSA spend authorization**, CLI miner
+- **9/9 tests** (core 4 + node 5): genesis mining, PoW rejection, valid PQ spend, tampered-signature rejection, double-spend impossibility
+- [GENESIS.md](GENESIS.md) — draft v0.1 of genesis parameters, open for public review
 
-**Next:** testnet node (Rust, lightweight), genesis parameters draft, explorator, whitepaper.
+Live demo (release build, difficulty 14):
+
+```text
+$ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
+  block   1  hash=4b2305d2585ecffe…  nonce=     11322  supply=50
+  block   2  hash=8450c5d8b73829e4…  nonce=       162  supply=100
+  block   3  hash=42b53c7129ad39c7…  nonce=     10575  supply=150
+  chain tip  : 42b53c7129ad39c7958819a9a50e82db
+  utxos      : 3
+  status     : OK — PoW + PQ coinbase committed
+```
+
+**Next:** p2p networking (phase 3), explorator, whitepaper. Found a real bug with us: the first coinbase design collided txids across blocks (height lived in the uncommitted signature field) — caught by the double-spend test, fixed by committing height in the prevout.
 
 ## Quick start
 
@@ -51,11 +64,16 @@ cargo test
 
 ```text
 $ cargo test
-running 4 tests
+running 9 tests (4 core + 5 node)
 test tests::sighash_is_deterministic ... ok
 test tests::public_key_size_matches_crate_spec ... ok
 test tests::tampered_message_is_rejected ... ok
 test tests::ml_dsa_keygen_sign_verify_roundtrip ... ok
+test chain::tests::genesis_mines_and_applies ... ok
+test chain::tests::pow_rejects_low_work_block ... ok
+test chain::tests::spend_requires_valid_pq_signature ... ok
+test chain::tests::tampered_signature_is_rejected ... ok
+test chain::tests::double_spend_is_impossible ... ok
 ```
 
 ## FAQ
