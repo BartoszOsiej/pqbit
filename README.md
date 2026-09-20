@@ -86,6 +86,24 @@ test chain::tests::double_spend_is_impossible ... ok
 
 **Is the founder stash going to be dumped?** The 100-coin founder address will be published at genesis and watched publicly. It is a reputational bond, not an allocation.
 
+## Acknowledgments
+
+Standing on the shoulders of: [rust-bitcoin](https://github.com/rust-bitcoin/rust-bitcoin), [bitcoinpqc](https://github.com/bitcoinpqc/bitcoinpqc) (the FIPS-certified PQ signature bridge), the BIP-360 authors, and fifteen years of Bitcoin Core engineering discipline.
+
+## Hartwell Labs ecosystem
+
+pqbit is the flagship research project of **Hartwell Labs**:
+
+| Project | What | Landing |
+|---|---|---|
+| pqbit | Post-quantum Bitcoin | https://bartoszosiej.github.io/pqbit/ |
+| quantum-shield | ML-KEM-768 file encryption (pqguard) | https://bartoszosiej.github.io/quantum-shield/ |
+| fortis | Post-quantum measured boot | https://bartoszosiej.github.io/fortis/ |
+| talus-process-monitor | eBPF ransomware detect & respond | https://bartoszosiej.github.io/talus-process-monitor/ |
+| externum | Language compiling to Python/Bash/bytecode | https://bartoszosiej.github.io/externum/ |
+| NV2_ENGINE | Voxel engine, neural terrain | https://bartoszosiej.github.io/NV2_ENGINE/ |
+| Docs | Full documentation hub (Fumadocs) | https://bartoszosiej.github.io/Docs/ |
+
 ## License
 
 MIT — like Bitcoin Core. Built in the open by [Hartwell Labs](https://bartoszosiej.github.io/).
