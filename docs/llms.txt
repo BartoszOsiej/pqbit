@@ -1,0 +1,64 @@
+# Hartwell Labs — Bartosz Osiej
+
+> Systems engineer & founder. Post-quantum cryptography, eBPF security tooling, programming languages, and a post-quantum Bitcoin. Everything MIT-licensed, built in the open, Poland.
+
+Main site: https://bartoszosiej.github.io/
+
+## Projects
+
+### pqbit
+Post-quantum Bitcoin: ML-DSA-44/SLH-DSA (FIPS 204/205) signatures from genesis, UTXO + PoW, fair-launch constitution (zero premine, founder stash ≤100 coins never moved). Testnet node in Rust live, genesis parameters open for review.
+Repo: https://github.com/BartoszOsiej/pqbit
+Landing: https://bartoszosiej.github.io/pqbit/
+Genesis draft: https://github.com/BartoszOsiej/pqbit/blob/master/GENESIS.md
+
+### talus-process-monitor
+eBPF ransomware detection & response for Linux (Rust + eBPF): sliding-window heuristics over syscalls, automated SIGKILL response, 280k events/s at ~7.6% CPU.
+Repo: https://github.com/BartoszOsiej/talus-process-monitor
+Landing: https://bartoszosiej.github.io/talus-process-monitor/
+
+### quantum-shield
+Post-quantum file encryption CLI (pqguard): ML-KEM-768 (FIPS 203) + AES-256-GCM, fuzz-tested.
+Repo: https://github.com/BartoszOsiej/quantum-shield
+Landing: https://bartoszosiej.github.io/quantum-shield/
+
+### fortis
+Post-quantum measured boot for Linux.
+Repo: https://github.com/BartoszOsiej/fortis
+Landing: https://bartoszosiej.github.io/fortis/
+
+### externum
+Programming language that compiles to Python, standalone Bash, and bytecode. Self-hosted, ~379 tests, browser REPL.
+Repo: https://github.com/BartoszOsiej/externum
+Playground: https://bartoszosiej.github.io/externum/
+
+### NV2_ENGINE
+Rust voxel engine (wgpu) with MeMLP neural terrain from NASA real-climate data. Powers Vivia: Beyond The Known.
+Repo: https://github.com/BartoszOsiej/NV2_ENGINE
+Landing: https://bartoszosiej.github.io/NV2_ENGINE/
+
+### linux-aegis
+Linux security module.
+Repo: https://github.com/BartoszOsiej/linux-aegis
+Landing: https://bartoszosiej.github.io/linux-aegis/
+
+### Aurora
+OS in the browser.
+Repo: https://github.com/BartoszOsiej/Aurora
+Landing: https://bartoszosiej.github.io/Aurora/
+
+### The Stitcher Trilogy
+Crime horror novels by Bartosz Osiej, published on Amazon Kindle.
+Landing: https://bartoszosiej.github.io/thethreadcalls/
+
+## Documentation
+
+Full docs hub (Fumadocs, llms.txt enabled): https://bartoszosiej.github.io/Docs/
+Project registry: https://bartoszosiej.github.io/Docs/docs/projects/
+
+## Contact
+
+- Email: thethreadcalls@outlook.com
+- Telegram channel: https://t.me/hartwell_info
+- GitHub: https://github.com/BartoszOsiej
+- Mastodon: https://mastodon.social/@bartoszosiej
