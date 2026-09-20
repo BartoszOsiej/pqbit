@@ -1,0 +1,17 @@
+[package]
+name = "pqbit-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Post-quantum Bitcoin: lightweight, quantum-resistant UTXO node core in Rust (Hartwell Labs)"
+repository = "https://github.com/BartoszOsiej/pqbit"
+keywords = ["bitcoin", "post-quantum", "blockchain", "rust", "pqc"]
+categories = ["cryptography"]
+
+[dependencies]
+bitcoin = "0.32"
+bitcoinpqc = "0.4"
+rand = "0.8"
+
+[profile.release]
+lto = true
