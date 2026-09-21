@@ -59,23 +59,29 @@ $ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
 ```bash
 git clone https://github.com/BartoszOsiej/pqbit
 cd pqbit
-cargo test
+cargo test --release          # 24 tests: core, chain, p2p, mempool
+
+# run a node that mines and gossips:
+cargo run -p pqbit --bin pqbit-node -- serve \
+  --blocks 5 --difficulty 12 --listen 127.0.0.1:18444 --keep-mining
+
+# a second node joins by seed and syncs (blocks + mempool):
+cargo run -p pqbit --bin pqbit-node -- serve \
+  --blocks 0 --difficulty 12 --listen 127.0.0.1:18445 \
+  --seed 127.0.0.1:18444 --interval 5 --keep-mining
 ```
+
+Anyone can run a node and mine by the same rules — the founder has no
+privilege beyond a ≤100-coin stash that can never be spent (see
+[GENESIS.md](GENESIS.md)).
 
 ## Verification
 
-```text
-$ cargo test
-running 9 tests (4 core + 5 node)
-test tests::sighash_is_deterministic ... ok
-test tests::public_key_size_matches_crate_spec ... ok
-test tests::tampered_message_is_rejected ... ok
-test tests::ml_dsa_keygen_sign_verify_roundtrip ... ok
-test chain::tests::genesis_mines_and_applies ... ok
-test chain::tests::pow_rejects_low_work_block ... ok
-test chain::tests::spend_requires_valid_pq_signature ... ok
-test chain::tests::tampered_signature_is_rejected ... ok
-test chain::tests::double_spend_is_impossible ... ok
+All 24 tests pass in CI on every push (unit, chain, wire-codec, gossip
+convergence, mempool relay, fork-choice reorg). Run locally:
+
+```bash
+cargo test --release
 ```
 
 ## FAQ
