@@ -114,7 +114,7 @@ impl std::fmt::Display for NodeError {
 impl std::error::Error for NodeError {}
 
 /// The UTXO set + chain tip state.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ChainState {
     /// key: (txid_hex, vout) -> value + pubkey
     pub utxos: HashMap<(String, u32), (u64, Vec<u8>)>,

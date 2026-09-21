@@ -434,22 +434,107 @@ impl NodeState {
             .tip_height
     }
 
-    /// Validate + apply one incoming block. Duplicates (height ≤ tip) are a
-    /// silent no-op; anything our chain rejects surfaces as NetError::BadBlock.
-    fn apply_incoming(&self, b: &Block) -> Result<(), NetError> {
-        {
-            let mut chain = self.chain.lock().expect("chain poisoned");
-            if b.height <= chain.tip_height {
-                return Ok(());
+    /// Store a block that does not extend our tip (a fork sibling). These are
+    /// kept so a longest-chain switch can re-apply them later without a re-fetch.
+    fn stash_block(&self, b: &Block) {
+        let mut store = self.blocks.lock().expect("store poisoned");
+        if !store.iter().any(|x| x.hash() == b.hash()) {
+            store.push(b.clone());
+        }
+    }
+
+    /// Validate + apply one incoming block.
+    ///
+    /// Fork choice (v1, honest): a block is applied when it extends our tip.
+    /// A sibling at the same height is stashed. A block TALLER than our tip
+    /// by more than 1 triggers a REORG: we roll our chain back to the fork
+    /// point and re-apply the incoming branch — standard longest-chain rule.
+    /// The UTXO set is rebuilt by replaying blocks (no undo log yet: honest,
+    /// simple, correct; the store is small on testnet).
+    pub fn apply_incoming(&self, incoming: &Block) -> Result<(), NetError> {
+        let mut chain = self.chain.lock().expect("chain poisoned");
+        if incoming.height <= chain.tip_height {
+            // same height, different hash → fork sibling: stash it
+            if incoming.height == chain.tip_height && incoming.hash() != chain.tip_hash {
+                drop(chain);
+                self.stash_block(incoming);
             }
+            return Ok(());
+        }
+        if incoming.prev_hash == chain.tip_hash {
+            // clean extension
             chain
+                .apply_block(incoming, self.reward)
+                .map_err(NetError::BadBlock)?;
+            drop(chain);
+            self.blocks
+                .lock()
+                .expect("store poisoned")
+                .push(incoming.clone());
+            return Ok(());
+        }
+        // Taller but not chaining on our tip → possible reorg. Longest-chain
+        // rule, v1: the incoming branch must already be fully known in our
+        // store (stashed earlier, chained back to genesis). If so, it is
+        // STRICTLY LONGER than our tip (height > tip_height) → reorg.
+        drop(chain);
+        let store = self.blocks.lock().expect("store poisoned");
+        let mut branch: Vec<Block> = vec![incoming.clone()];
+        let mut complete = false;
+        loop {
+            let tip_prev = branch.last().unwrap().prev_hash.clone();
+            if tip_prev.is_empty() {
+                complete = true; // chained back to genesis
+                break;
+            }
+            match store.iter().find(|b| b.hash() == tip_prev) {
+                Some(prev) => branch.push(prev.clone()),
+                None => break, // missing ancestor: cannot reorg yet (stash & wait)
+            }
+        }
+        if !complete {
+            drop(store);
+            self.stash_block(incoming);
+            return Ok(());
+        }
+        drop(store);
+        // REORG: replay the incoming branch from genesis with OUR difficulty
+        let difficulty = {
+            let chain = self.chain.lock().expect("chain poisoned");
+            chain.difficulty
+        };
+        let mut fresh = ChainState::new(difficulty);
+        let mut ordered = branch.clone();
+        ordered.reverse(); // genesis-side first
+        for b in &ordered {
+            fresh
                 .apply_block(b, self.reward)
                 .map_err(NetError::BadBlock)?;
         }
-        self.blocks
-            .lock()
-            .expect("store poisoned")
-            .push(b.clone());
+        // txs from orphaned blocks return to the mempool (best effort)
+        let new_hashes: Vec<String> = ordered.iter().map(|b| b.hash()).collect();
+        let orphaned_txs: Vec<pqbit_core::Transaction> = {
+            let store = self.blocks.lock().expect("store poisoned");
+            store
+                .iter()
+                .filter(|b| b.height > 0 && !new_hashes.contains(&b.hash()))
+                .flat_map(|b| b.transactions.iter().skip(1).cloned())
+                .collect()
+        };
+        {
+            let mut pool = self.pool.lock().expect("pool poisoned");
+            for tx in &orphaned_txs {
+                let _ = pool.accept(tx, &fresh);
+            }
+        }
+        {
+            let mut store = self.blocks.lock().expect("store poisoned");
+            *store = ordered;
+        }
+        {
+            let mut chain = self.chain.lock().expect("chain poisoned");
+            *chain = fresh;
+        }
         Ok(())
     }
 }
@@ -1168,6 +1253,89 @@ mod tests {
         assert_eq!(blk.transactions.len(), 2, "coinbase + pooled spend");
         assert_eq!(n.best_height(), 2);
         assert!(n.pool.lock().unwrap().is_empty(), "pool drained after mining");
+    }
+
+    #[test]
+    fn reorg_to_longer_fork_branch() {
+        // Two miners build different blocks at height 2 (fork). The fork with
+        // MORE work (height 3) wins: node must reorg and orphan our block 2.
+        use pqbit_core::{generate_pq_keypair, SigAlgo};
+        let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+
+        // common ancestor: block 1
+        let mut st0 = ChainState::new(D);
+        let b1 = {
+            let blk = Block {
+                height: 1,
+                prev_hash: String::new(),
+                timestamp: 1_700_000_000,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st0.apply_block(&mined, REWARD).expect("apply");
+            mined
+        };
+
+        // our branch: block 2A on top of block 1
+        let mut st_a = st0.clone() ;
+        let b2a = {
+            let blk = Block {
+                height: 2,
+                prev_hash: st_a.tip_hash.clone(),
+                timestamp: 1_700_000_100,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 2)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st_a.apply_block(&mined, REWARD).expect("apply");
+            mined
+        };
+
+        // node holds branch A (tip = 2A)
+        let n = node_with(st_a, vec![b1.clone(), b2a.clone()], "10.0.0.21:18444");
+        assert_eq!(n.best_height(), 2);
+
+        // rival branch: blocks 2B and 3 (LONGER) — mined off the same block 1
+        let mut st_b = st0.clone();
+        let b2b = {
+            let blk = Block {
+                height: 2,
+                prev_hash: st_b.tip_hash.clone(),
+                timestamp: 1_700_000_200,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 2)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st_b.apply_block(&mined, REWARD).expect("apply");
+            mined
+        };
+        let b3 = {
+            let blk = Block {
+                height: 3,
+                prev_hash: st_b.tip_hash.clone(),
+                timestamp: 1_700_000_300,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 3)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st_b.apply_block(&mined, REWARD).expect("apply");
+            mined
+        };
+
+        // 2B arrives first: same height sibling → stashed, tip unchanged
+        n.apply_incoming(&b2b).expect("stash sibling");
+        assert_eq!(n.best_height(), 2);
+
+        // block 3 arrives: branch (1←2B←3) is fully known & LONGER → reorg
+        n.apply_incoming(&b3).expect("reorg");
+        assert_eq!(n.best_height(), 3, "reorged to the longer branch");
+        assert_eq!(n.chain.lock().unwrap().tip_hash, b3.hash());
+        // store now holds exactly the winning branch
+        let hashes: Vec<String> = n.blocks.lock().unwrap().iter().map(|b| b.hash()).collect();
+        assert!(hashes.contains(&b3.hash()));
+        assert!(hashes.contains(&b2b.hash()));
+        assert!(!hashes.contains(&b2a.hash()), "orphaned block removed from store");
     }
 
     #[test]
