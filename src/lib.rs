@@ -5,7 +5,8 @@
 //! Bitcoin BIP-360 (P2MR, merged into the BIPs repo February 2026).
 //! Lightweight UTXO model, fair-launch design.
 
-use bitcoinpqc::{Algorithm, KeyPair, PublicKey, SecretKey, Signature};
+use bitcoinpqc::{Algorithm, PublicKey, SecretKey, Signature};
+pub use bitcoinpqc::KeyPair;
 use std::fmt;
 
 /// Signature algorithms supported at genesis. Both are NIST FIPS standards.

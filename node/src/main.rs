@@ -5,6 +5,7 @@
 //! they are taller, push when we are, every block PQ-validated on arrival.
 
 mod chain;
+mod mempool;
 mod net;
 
 use chain::{mine_block, Block, ChainState};

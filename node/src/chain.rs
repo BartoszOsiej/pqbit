@@ -173,6 +173,33 @@ impl ChainState {
         Ok(())
     }
 
+    /// Read-only validation of a standalone transaction against the current
+    /// UTXO set (no mutation). Used by the mempool before admitting a tx;
+    /// the state-changing path is `apply_spend`.
+    pub fn validate_spend(&self, tx: &Transaction) -> Result<(), NodeError> {
+        let sighash = tx.sighash();
+        let mut input_sum = 0u64;
+        for txin in &tx.inputs {
+            let key = (hex::encode(txin.prev_txid), txin.vout);
+            let (value, pubkey) = self
+                .utxos
+                .get(&key)
+                .cloned()
+                .ok_or(NodeError::UnknownUtxo)?;
+            let ok = verify_pq(SigAlgo::MlDsa44, &pubkey, &sighash, &txin.signature)
+                .map_err(|_| NodeError::BadSignature)?;
+            if !ok {
+                return Err(NodeError::BadSignature);
+            }
+            input_sum += value;
+        }
+        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        if output_sum > input_sum {
+            return Err(NodeError::Overspend);
+        }
+        Ok(())
+    }
+
     /// Verify and apply one spend transaction against the UTXO set.
     fn apply_spend(&mut self, tx: &Transaction) -> Result<(), NodeError> {
         let sighash = tx.sighash();
