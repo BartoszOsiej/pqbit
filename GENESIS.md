@@ -32,6 +32,7 @@ Proposed by: Hartwell Labs (Bartosz Osiej, founder) · 2026-09-20
 |---|---|
 | **Premine / presale** | **Zero.** There is no allocation to buy, join, or negotiate. |
 | **Founder stash** | **≤ 100 pqc**, single public address, published at genesis, **never spent**. Watched publicly; one moved coin voids the project's own narrative. |
+| **Founder mining rights** | **The founder mines like anyone else.** After genesis, the founder may mine blocks at the same difficulty, with the same reward and the same rules as every other participant — coinbase pays their own key exactly like any miner's. What is forbidden is *privilege*, not participation: no premine, no extra subsidy, no early access to the founder stash, no rule changes favoring the founder's keys. Anything mined honestly belongs to the miner who did the work — founder or not. |
 | **Lab revenue** | Around the protocol only: grants, enterprise support, documentation. Never token sales. |
 | **Kill criteria** | < 50 non-founder nodes 6 months after genesis → coin experiment frozen, project reverts to research. Pre-signed exit, no sunk cost. |
 
