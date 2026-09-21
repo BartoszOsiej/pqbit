@@ -75,8 +75,12 @@ cargo run -p pqbit --bin pqbit-node -- send \
   --pk pqbit.pk --sk pqbit.sk --owned utxos.txt \
   --to <recipient-pubkey-hex> --out tx.hex
 
-# validate a signed tx against the UTXO set (future RPC injection point):
+# validate a signed tx against the UTXO set (offline check):
 cargo run -p pqbit --bin pqbit-node -- submit --tx tx.hex --utxos utxos.txt
+
+# push a signed tx to a LIVE node: it validates into its mempool and the
+# next mined block packs it (end-to-end transfer):
+cargo run -p pqbit --bin pqbit-node -- broadcast --addr 127.0.0.1:18444 --tx tx.hex
 
 # run a node that mines and gossips:
 cargo run -p pqbit --bin pqbit-node -- serve \

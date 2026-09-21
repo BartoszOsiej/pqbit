@@ -52,6 +52,16 @@ enum Cmd {
         #[arg(long)]
         utxos: String,
     },
+    /// Push a signed tx to a LIVE node over the p2p wire (handshake + MSG_TX);
+    /// the node validates it into its mempool, miners will pack it.
+    Broadcast {
+        /// host:port of the node (its --listen address)
+        #[arg(long)]
+        addr: String,
+        /// Path to file with the tx wire-hex (from `send --out`)
+        #[arg(long)]
+        tx: String,
+    },
     /// Generate a new PQ keypair (a wallet): prints the public key (used as
     /// the payout address in coinbase/outputs) and the secret key.
     ///
@@ -110,6 +120,9 @@ enum Cmd {
         /// Keep mining new blocks on the tip forever (packs mempool txs)
         #[arg(long, default_value_t = false)]
         keep_mining: bool,
+        /// Payout address for coinbase (pubkey hex); defaults to a fresh key
+        #[arg(long)]
+        payout: Option<String>,
         /// Dump the UTXO set ("value pubkey_hex" lines) to this file after mining
         #[arg(long)]
         dump_utxos: Option<String>,
@@ -318,6 +331,39 @@ key signs spends. Re-run with --write to store as files.");
                 }
             }
         }
+        Cmd::Broadcast { addr, tx } => {
+            let hex_str = std::fs::read_to_string(&tx).expect("read tx file").trim().to_string();
+            let wire = hex::decode(&hex_str).expect("tx hex");
+            // wrap in MEMPOOL-style payload: u32 count + tx payload
+            let mut payload = Vec::with_capacity(4 + wire.len());
+            payload.extend_from_slice(&1u32.to_le_bytes());
+            payload.extend_from_slice(&wire);
+
+            let stream = std::net::TcpStream::connect(&addr)
+                .unwrap_or_else(|e| {
+                    eprintln!("ERROR: cannot connect to {addr}: {e}");
+                    std::process::exit(1);
+                });
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+            let mut stream = stream;
+
+            // handshake
+            net::write_message(&mut stream, net::MSG_HANDSHAKE, &net::encode_handshake(net::MAGIC, net::VERSION, 0))
+                .unwrap_or_else(|e| { eprintln!("ERROR: handshake write: {e}"); std::process::exit(1); });
+            let reply = net::read_message(&mut stream)
+                .unwrap_or_else(|e| { eprintln!("ERROR: handshake read: {e}"); std::process::exit(1); });
+            if reply.kind != net::MSG_HANDSHAKE {
+                eprintln!("ERROR: expected handshake reply, got kind {:#x}", reply.kind);
+                std::process::exit(1);
+            }
+
+            // push the tx
+            net::write_message(&mut stream, net::MSG_TX, &payload)
+                .unwrap_or_else(|e| { eprintln!("ERROR: tx push: {e}"); std::process::exit(1); });
+            println!("tx pushed to {addr} ({} bytes wire) — node will validate into mempool", wire.len());
+            // graceful close: drop after flush; node closes on EOF/timeout
+            drop(stream);
+        }
         Cmd::SelfTest => {
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
             let msg = b"pqbit selftest";
@@ -326,12 +372,16 @@ key signs spends. Re-run with --write to store as files.");
             println!("ML-DSA-44 keygen/sign/verify: {}", if ok { "PASS" } else { "FAIL" });
             std::process::exit(if ok { 0 } else { 1 });
         }
-        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining, dump_utxos, extended } => {
+        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining, payout, dump_utxos, extended } => {
             println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
             println!("  mining {} blocks @ {} bits, serving on {}", blocks, difficulty, listen);
             println!();
             let mut st = ChainState::new(difficulty);
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+            let payout_pk: Vec<u8> = match &payout {
+                Some(h) => hex::decode(h).expect("payout hex"),
+                None => kp.public_key.bytes.clone(),
+            };
             let store: std::sync::Arc<std::sync::Mutex<Vec<chain::Block>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             for i in 1..=blocks {
@@ -342,7 +392,7 @@ key signs spends. Re-run with --write to store as files.");
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
-                    transactions: vec![chain::coinbase(kp.public_key.bytes.clone(), reward, st.tip_height + 1)],
+                    transactions: vec![chain::coinbase(payout_pk.clone(), reward, st.tip_height + 1)],
                     nonce: 0,
                 };
                 let mined = chain::mine_block(blk, difficulty, 200_000_000).expect("mining budget");
@@ -364,7 +414,7 @@ key signs spends. Re-run with --write to store as files.");
                 chain: std::sync::Arc::new(std::sync::Mutex::new(st)),
                 book: std::sync::Arc::new(std::sync::Mutex::new(net::AddrBook::new())),
                 pool: std::sync::Arc::new(std::sync::Mutex::new(mempool::Mempool::new())),
-                miner_key: Arc::new(kp.public_key.bytes.clone()),
+                miner_key: Arc::new(payout_pk.clone()),
             };
             if let Some(path) = &dump_utxos {
                 use std::io::Write;
