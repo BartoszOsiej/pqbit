@@ -7,7 +7,7 @@ Main site: https://bartoszosiej.github.io/
 ## Projects
 
 ### pqbit
-Post-quantum Bitcoin: ML-DSA-44/SLH-DSA (FIPS 204/205) signatures from genesis, UTXO + PoW, fair-launch constitution (zero premine, founder stash ≤100 coins never moved). Testnet node in Rust live, genesis parameters open for review.
+Post-quantum Bitcoin: ML-DSA-44/SLH-DSA (FIPS 204/205) signatures from genesis, UTXO + PoW, fair-launch constitution (zero premine, founder stash ≤100 coins never moved). Testnet node in Rust: gossiping p2p (addr exchange, push/pull block relay), PQ-validated mempool with wire relay, continuous mining (--keep-mining). 23/23 tests, CI green. Genesis parameters open for review; grant application filed (NGI Zero / NLnet).
 Repo: https://github.com/BartoszOsiej/pqbit
 Landing: https://bartoszosiej.github.io/pqbit/
 Genesis draft: https://github.com/BartoszOsiej/pqbit/blob/master/GENESIS.md
