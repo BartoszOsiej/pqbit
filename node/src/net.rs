@@ -1,40 +1,51 @@
-//! pqbit-node p2p scaffold (phase 3, start).
+//! pqbit-node p2p layer (phase 3).
 //!
-//! Honest scope, in order of value:
+//! Honest scope:
 //!   1. length-prefixed framing (4-byte LE) with a hard 4 MiB cap,
 //!   2. magic/version handshake so two nodes can greet each other,
 //!   3. Ping/Pong liveness,
-//!   4. full-block PULL sync: a peer asks `GetBlocks(from_height)` and gets
-//!      every block above that height in one shot.
+//!   4. full-block PULL sync: `GetBlocks(from_height)` → every block above it,
+//!   5. addr manager: GETADDR/ADDR exchange + self-announcement, so a node
+//!      that only knows one peer learns the rest of the mesh,
+//!   6. push/pull GOSSIP rounds: a node taller than its peer pushes blocks,
+//!      a node shorter than its peer pulls them — every block is PQ-validated
+//!      before it touches our chain,
+//!   7. a background gossiper loop running connect-sync-disconnect rounds.
 //!
-//! Deliberately NOT here yet (next steps): addr manager, push relay/gossip,
-//! reorg handling, rate limiting. This file is the smallest honest skeleton
-//! two real nodes can already sync from — boring, auditable, std-only.
+//! Deliberately NOT here yet: persistent connections, unsolicited re-relay
+//! (periodic rounds propagate instead — bounded traffic), NAT traversal,
+//! reorg handling, rate limiting. Boring, auditable, std-only.
 
-// Client-side pull codec lands with the next milestone; today the tests are
-// its only caller, so silence dead_code until the CLI gets `sync`/`pull`.
 #![allow(dead_code)]
 
-use crate::chain::Block;
+use crate::chain::{ChainState, NodeError, Block};
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Protocol magic: "PQBT".
 pub const MAGIC: u32 = 0x5051_4254;
 /// Wire protocol version (bump on breaking change).
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Hard cap for a single framed message (4 MiB; a full PQ block is far below).
 pub const MAX_MSG: usize = 4 * 1024 * 1024;
 /// Per-read timeout; a silent peer gets dropped instead of pinned.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Max entries an addr book will hold (mesh cap for v1).
+pub const MAX_BOOK: usize = 512;
+/// Max addrs accepted in one ADDR message.
+pub const MAX_ADDR_MSG: usize = 1024;
 
 pub const MSG_HANDSHAKE: u8 = 0x01;
 pub const MSG_PING: u8 = 0x02;
 pub const MSG_PONG: u8 = 0x03;
 pub const MSG_GETBLOCKS: u8 = 0x04;
 pub const MSG_BLOCKS: u8 = 0x05;
+pub const MSG_GETADDR: u8 = 0x06;
+pub const MSG_ADDR: u8 = 0x07;
 
 /// Errors the p2p layer can surface.
 #[derive(Debug)]
@@ -48,6 +59,8 @@ pub enum NetError {
     BadMagic,
     /// Message type byte we do not know.
     UnknownMsg(u8),
+    /// Peer sent a block our chain rejected (PQ/PoW/chaining).
+    BadBlock(NodeError),
 }
 
 impl std::fmt::Display for NetError {
@@ -58,6 +71,7 @@ impl std::fmt::Display for NetError {
             NetError::Truncated => write!(f, "payload truncated mid-field"),
             NetError::BadMagic => write!(f, "peer magic mismatch"),
             NetError::UnknownMsg(k) => write!(f, "unknown message type 0x{k:02x}"),
+            NetError::BadBlock(e) => write!(f, "peer sent invalid block: {e}"),
         }
     }
 }
@@ -297,11 +311,145 @@ pub fn decode_blocks(p: &[u8]) -> Result<Vec<Block>, NetError> {
 }
 
 // ---------------------------------------------------------------------------
-// peer loop
+// addr codec
 // ---------------------------------------------------------------------------
 
-/// Serve one connection: handshake, then answer Ping and GetBlocks until EOF.
-pub fn handle_conn(mut stream: TcpStream, blocks: &Arc<Mutex<Vec<Block>>>) -> Result<(), NetError> {
+/// ADDR payload: u32 count + count × length-prefixed "ip:port" strings.
+pub fn encode_addrs(addrs: &[String]) -> Vec<u8> {
+    let mut o = Vec::new();
+    push_u32(&mut o, addrs.len() as u32);
+    for a in addrs {
+        push_bytes(&mut o, a.as_bytes());
+    }
+    o
+}
+
+pub fn decode_addrs(p: &[u8]) -> Result<Vec<String>, NetError> {
+    let mut r = Reader::new(p);
+    let n = r.u32()? as usize;
+    if n > MAX_ADDR_MSG {
+        return Err(NetError::TooLarge);
+    }
+    let mut out = Vec::with_capacity(n.min(64));
+    for _ in 0..n {
+        let s = String::from_utf8(r.bytes()?).map_err(|_| NetError::Truncated)?;
+        out.push(s);
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// addr book
+// ---------------------------------------------------------------------------
+
+/// Peer address book: addr → last-seen (UNIX secs). Self-announcement plus
+/// GETADDR gossip makes a one-seed node discover the rest of the mesh.
+#[derive(Default)]
+pub struct AddrBook {
+    map: HashMap<String, u64>,
+}
+
+impl AddrBook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Merge one addr. Returns true if it was new. Rejects junk and, when the
+    /// book is full, unknown addrs (known ones just get their last-seen bumped).
+    pub fn merge(&mut self, addr: &str, now: u64) -> bool {
+        let ok = !addr.is_empty()
+            && addr.len() <= 64
+            && !addr.contains(char::is_whitespace)
+            && addr.contains(':');
+        if !ok {
+            return false;
+        }
+        if let Some(seen) = self.map.get_mut(addr) {
+            *seen = now;
+            return false;
+        }
+        if self.map.len() >= MAX_BOOK {
+            return false;
+        }
+        self.map.insert(addr.to_string(), now);
+        true
+    }
+
+    pub fn addrs(&self) -> Vec<String> {
+        self.map.keys().cloned().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// node state
+// ---------------------------------------------------------------------------
+
+/// Everything a connection handler or gossip round needs. All shared state is
+/// behind Arc<Mutex<…>> so inbound threads and the gossiper see one node.
+#[derive(Clone)]
+pub struct NodeState {
+    /// The addr we advertise to peers ("ip:port" they can dial back).
+    pub listen: String,
+    /// Coinbase reward cap (validation parameter).
+    pub reward: u64,
+    /// Append-only validated block store.
+    pub blocks: Arc<Mutex<Vec<Block>>>,
+    /// The authoritative chain state (UTXO set + tip).
+    pub chain: Arc<Mutex<ChainState>>,
+    /// Known peer addresses.
+    pub book: Arc<Mutex<AddrBook>>,
+}
+
+impl NodeState {
+    pub fn best_height(&self) -> u64 {
+        self.chain
+            .lock()
+            .expect("chain poisoned")
+            .tip_height
+    }
+
+    /// Validate + apply one incoming block. Duplicates (height ≤ tip) are a
+    /// silent no-op; anything our chain rejects surfaces as NetError::BadBlock.
+    fn apply_incoming(&self, b: &Block) -> Result<(), NetError> {
+        {
+            let mut chain = self.chain.lock().expect("chain poisoned");
+            if b.height <= chain.tip_height {
+                return Ok(());
+            }
+            chain
+                .apply_block(b, self.reward)
+                .map_err(NetError::BadBlock)?;
+        }
+        self.blocks
+            .lock()
+            .expect("store poisoned")
+            .push(b.clone());
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// connection handler
+// ---------------------------------------------------------------------------
+
+/// Serve one connection: handshake, then answer Ping / GetBlocks / GetAddr,
+/// merge announced addrs, and accept pushed blocks (validated) until EOF.
+pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetError> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let m = read_message(&mut stream)?;
     if m.kind != MSG_HANDSHAKE {
@@ -311,16 +459,10 @@ pub fn handle_conn(mut stream: TcpStream, blocks: &Arc<Mutex<Vec<Block>>>) -> Re
     if magic != MAGIC {
         return Err(NetError::BadMagic);
     }
-    let our_height = blocks
-        .lock()
-        .expect("block store poisoned")
-        .last()
-        .map(|b| b.height)
-        .unwrap_or(0);
     write_message(
         &mut stream,
         MSG_HANDSHAKE,
-        &encode_handshake(MAGIC, VERSION, our_height),
+        &encode_handshake(MAGIC, VERSION, state.best_height()),
     )?;
 
     loop {
@@ -341,10 +483,33 @@ pub fn handle_conn(mut stream: TcpStream, blocks: &Arc<Mutex<Vec<Block>>>) -> Re
             }
             MSG_GETBLOCKS => {
                 let from = decode_u64(&m.payload)?;
-                let store = blocks.lock().expect("block store poisoned");
+                let store = state.blocks.lock().expect("store poisoned");
                 let reply: Vec<Block> = store.iter().filter(|b| b.height > from).cloned().collect();
                 drop(store);
                 write_message(&mut stream, MSG_BLOCKS, &encode_blocks(&reply))?;
+            }
+            MSG_GETADDR => {
+                let addrs = state.book.lock().expect("book poisoned").addrs();
+                write_message(&mut stream, MSG_ADDR, &encode_addrs(&addrs))?;
+            }
+            MSG_ADDR => {
+                let addrs = decode_addrs(&m.payload)?;
+                let mut book = state.book.lock().expect("book poisoned");
+                let now = now_unix();
+                for a in addrs {
+                    if a == state.listen {
+                        continue; // never gossip ourselves to ourselves
+                    }
+                    book.merge(&a, now);
+                }
+            }
+            MSG_BLOCKS => {
+                // Unsolicited push from a taller peer. Validate every block;
+                // one bad block and we drop the connection (misbehaving peer).
+                let blocks = decode_blocks(&m.payload)?;
+                for b in &blocks {
+                    state.apply_incoming(b)?;
+                }
             }
             other => return Err(NetError::UnknownMsg(other)),
         }
@@ -352,13 +517,13 @@ pub fn handle_conn(mut stream: TcpStream, blocks: &Arc<Mutex<Vec<Block>>>) -> Re
 }
 
 /// Bind + accept loop (one thread per connection).
-pub fn serve(listener: TcpListener, blocks: Arc<Mutex<Vec<Block>>>) -> std::io::Result<()> {
+pub fn serve(listener: TcpListener, state: NodeState) -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                let blocks = Arc::clone(&blocks);
+                let state = state.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_conn(s, &blocks) {
+                    if let Err(e) = handle_conn(s, &state) {
                         eprintln!("pqbit-net: peer dropped: {e}");
                     }
                 });
@@ -368,6 +533,133 @@ pub fn serve(listener: TcpListener, blocks: Arc<Mutex<Vec<Block>>>) -> std::io::
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// gossip (client side)
+// ---------------------------------------------------------------------------
+
+/// What one gossip round achieved.
+#[derive(Debug, Default, PartialEq)]
+pub struct GossipRound {
+    pub their_height: u64,
+    /// Blocks we pulled and applied (peer was taller).
+    pub pulled: usize,
+    /// Blocks we pushed (we were taller).
+    pub pushed: usize,
+    /// New addresses learned from the peer's book.
+    pub learned: usize,
+}
+
+/// One connect-sync-disconnect round against `peer`:
+/// handshake → self-announce → GETADDR → pull or push, depending on heights.
+pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetError> {
+    let mut s = TcpStream::connect(peer)?;
+    s.set_read_timeout(Some(READ_TIMEOUT))?;
+
+    let our_height = state.best_height();
+    write_message(&mut s, MSG_HANDSHAKE, &encode_handshake(MAGIC, VERSION, our_height))?;
+    let m = read_message(&mut s)?;
+    if m.kind != MSG_HANDSHAKE {
+        return Err(NetError::UnknownMsg(m.kind));
+    }
+    let (magic, _v, their_height) = decode_handshake(&m.payload)?;
+    if magic != MAGIC {
+        return Err(NetError::BadMagic);
+    }
+
+    // 1. announce ourselves so the peer's book grows (mesh formation)
+    let announce = [state.listen.clone()];
+    write_message(&mut s, MSG_ADDR, &encode_addrs(&announce))?;
+    // 2. ask for their book
+    write_message(&mut s, MSG_GETADDR, &[])?;
+    let m = read_message(&mut s)?;
+    if m.kind != MSG_ADDR {
+        return Err(NetError::UnknownMsg(m.kind));
+    }
+    let mut learned = 0usize;
+    {
+        let mut book = state.book.lock().expect("book poisoned");
+        let now = now_unix();
+        for a in decode_addrs(&m.payload)? {
+            if a == state.listen {
+                continue;
+            }
+            if book.merge(&a, now) {
+                learned += 1;
+            }
+        }
+    }
+
+    let mut round = GossipRound {
+        their_height,
+        learned,
+        ..Default::default()
+    };
+
+    // 3. sync: pull if they are taller, push if we are
+    if their_height > our_height {
+        write_message(&mut s, MSG_GETBLOCKS, &encode_u64(our_height))?;
+        let m = read_message(&mut s)?;
+        if m.kind != MSG_BLOCKS {
+            return Err(NetError::UnknownMsg(m.kind));
+        }
+        let blocks = decode_blocks(&m.payload)?;
+        for b in &blocks {
+            state.apply_incoming(b)?;
+            round.pulled += 1;
+        }
+    } else if our_height > their_height {
+        let blocks: Vec<Block> = {
+            let store = state.blocks.lock().expect("store poisoned");
+            store
+                .iter()
+                .filter(|b| b.height > their_height)
+                .cloned()
+                .collect()
+        };
+        if !blocks.is_empty() {
+            write_message(&mut s, MSG_BLOCKS, &encode_blocks(&blocks))?;
+            round.pushed = blocks.len();
+        }
+    }
+    Ok(round)
+}
+
+/// Background gossip loop: periodic rounds to every known peer (seeds first,
+/// then anything learned along the way). Runs until `stop` is set.
+pub fn gossiper_loop(seeds: Vec<String>, state: NodeState, interval: Duration, stop: Arc<AtomicBool>) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut targets: Vec<String> = seeds.clone();
+        targets.extend(state.book.lock().expect("book poisoned").addrs());
+        targets.sort();
+        targets.dedup();
+        // bound work per round: at most 8 peers per tick
+        for peer in targets.into_iter().take(8) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match gossip_round(&peer, &state) {
+                Ok(r) => {
+                    if r.pulled > 0 || r.pushed > 0 || r.learned > 0 {
+                        eprintln!(
+                            "pqbit-net: gossip {peer}: +{} pulled, {} pushed, {} addrs learned (their tip {})",
+                            r.pulled, r.pushed, r.learned, r.their_height
+                        );
+                    }
+                }
+                Err(e) => eprintln!("pqbit-net: gossip {peer} failed: {e}"),
+            }
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// one-shot pull (kept as a primitive for a future `sync` subcommand)
+// ---------------------------------------------------------------------------
 
 /// One-shot client: connect, handshake, pull blocks above `from_height`.
 /// Returns (their best height, blocks).
@@ -401,7 +693,10 @@ pub fn pull_blocks(addr: &str, from_height: u64) -> Result<(u64, Vec<Block>), Ne
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pqbit_core::{Transaction, TxOut};
+    use pqbit_core::{generate_pq_keypair, SigAlgo, Transaction, TxOut};
+
+    const D: u32 = 8;
+    const REWARD: u64 = 50;
 
     fn fake_block(height: u64, prev: &str) -> Block {
         Block {
@@ -419,6 +714,52 @@ mod tests {
             }],
             nonce: height * 7,
         }
+    }
+
+    /// Mine a real `n`-block chain (PQ coinbase, real PoW) and return
+    /// (ChainState, blocks).
+    fn mined_chain(n: u64) -> (ChainState, Vec<Block>) {
+        let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+        let mut st = ChainState::new(D);
+        let mut blocks = Vec::new();
+        for h in 1..=n {
+            let blk = Block {
+                height: st.tip_height + 1,
+                prev_hash: st.tip_hash.clone(),
+                timestamp: 1_700_000_000 + h,
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    st.tip_height + 1,
+                )],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st.apply_block(&mined, REWARD).expect("apply");
+            blocks.push(mined);
+        }
+        (st, blocks)
+    }
+
+    fn node_with(chain: ChainState, blocks: Vec<Block>, listen: &str) -> NodeState {
+        NodeState {
+            listen: listen.to_string(),
+            reward: REWARD,
+            blocks: Arc::new(Mutex::new(blocks)),
+            chain: Arc::new(Mutex::new(chain)),
+            book: Arc::new(Mutex::new(AddrBook::new())),
+        }
+    }
+
+    /// Spawn a one-connection server for `state` and return its dial address.
+    fn spawn_server(state: NodeState) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            let (s, _) = listener.accept().expect("accept");
+            let _ = handle_conn(s, &state);
+        });
+        addr
     }
 
     #[test]
@@ -452,52 +793,166 @@ mod tests {
     }
 
     #[test]
+    fn addr_codec_and_book() {
+        let addrs = vec!["10.0.0.1:18444".to_string(), "[::1]:18445".to_string()];
+        let dec = decode_addrs(&encode_addrs(&addrs)).expect("decode addrs");
+        assert_eq!(dec, addrs);
+
+        let mut book = AddrBook::new();
+        assert!(book.merge("1.2.3.4:1", 100));
+        assert!(!book.merge("1.2.3.4:1", 200), "dup is not new");
+        assert!(!book.merge("", 1), "empty rejected");
+        assert!(!book.merge("no port", 1), "needs a colon");
+        assert!(!book.merge("1.2.3.4:1 with space", 1));
+        assert_eq!(book.len(), 1);
+        assert_eq!(book.addrs(), vec!["1.2.3.4:1".to_string()]);
+    }
+
+    #[test]
     fn end_to_end_sync_two_nodes() {
         // node A: a real 2-block chain mined with the actual PQ miner
-        use crate::chain::{mine_block, coinbase, ChainState};
-        use pqbit_core::{generate_pq_keypair, SigAlgo};
-
-        let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
-        let reward = 50u64;
-        let mut st = ChainState::new(8);
-        let mut store: Vec<Block> = Vec::new();
-        for h in 1..=2u64 {
-            let blk = Block {
-                height: st.tip_height + 1,
-                prev_hash: st.tip_hash.clone(),
-                timestamp: 1_700_000_000 + h,
-                transactions: vec![coinbase(kp.public_key.bytes.clone(), reward, st.tip_height + 1)],
-                nonce: 0,
-            };
-            let mined = mine_block(blk, 8, 2_000_000).expect("mine");
-            st.apply_block(&mined, reward).expect("apply");
-            store.push(mined);
-        }
+        let (st, store) = mined_chain(2);
         let tip = st.tip_hash.clone();
+        let a = node_with(st, store, "127.0.0.1:1");
 
-        // serve A
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        let shared = Arc::new(Mutex::new(store));
-        let shared2 = Arc::clone(&shared);
-        let server = std::thread::spawn(move || {
-            let _ = handle_conn(
-                listener.accept().expect("accept").0,
-                &shared2,
-            );
-        });
+        let addr = spawn_server(a.clone());
 
         // node B: fresh, pulls everything, applies, reaches the same tip
         let (their_height, blocks) = pull_blocks(&addr, 0).expect("pull");
         assert_eq!(their_height, 2);
         assert_eq!(blocks.len(), 2);
-        let mut st_b = ChainState::new(8);
+        let mut st_b = ChainState::new(D);
         for b in &blocks {
-            st_b.apply_block(b, reward).expect("B applies valid block");
+            st_b.apply_block(b, REWARD).expect("B applies valid block");
         }
         assert_eq!(st_b.tip_hash, tip, "B must land on A's tip");
         assert_eq!(st_b.total_supply, 100); // 2 × 50
+    }
 
-        server.join().expect("server thread");
+    #[test]
+    fn gossip_push_updates_shorter_peer() {
+        // A has 2 blocks, B is empty. A runs a gossip round against B:
+        // B must learn A's addr (announcement) and receive both blocks (push),
+        // validated through the full PQ chain.
+        let (st_a, blocks_a) = mined_chain(2);
+        let tip_a = st_a.tip_hash.clone();
+        let a = node_with(st_a, blocks_a, "10.0.0.9:18444");
+
+        let (st_b, empty) = (ChainState::new(D), Vec::new());
+        let b = node_with(st_b, empty, "10.0.0.8:18444");
+
+        let addr_b = spawn_server(b.clone());
+
+        let r = gossip_round(&addr_b, &a).expect("gossip round");
+        assert_eq!(r.pushed, 2, "A pushes both blocks");
+        assert_eq!(r.pulled, 0);
+        assert_eq!(r.their_height, 0);
+
+        // Push is fire-and-forget: the server applies async. Wait (bounded)
+        // for B to converge.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while b.best_height() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // B applied and validated: same tip, same supply
+        assert_eq!(b.best_height(), 2);
+        assert_eq!(b.chain.lock().unwrap().tip_hash, tip_a);
+        assert_eq!(b.chain.lock().unwrap().total_supply, 100);
+        assert_eq!(b.blocks.lock().unwrap().len(), 2);
+
+        // B's book grew with A's announced addr
+        assert!(b.book.lock().unwrap().addrs().contains(&"10.0.0.9:18444".to_string()));
+    }
+
+    #[test]
+    fn gossip_pull_by_shorter_client() {
+        // Tall B serves; empty C dials B as a client: C must pull all 3 blocks
+        // (client was shorter) and land on B's tip.
+        let (st_b, blocks_b) = mined_chain(3);
+        let tip_b = st_b.tip_hash.clone();
+        let b = node_with(st_b, blocks_b, "10.0.0.7:18444");
+        let addr_b = spawn_server(b.clone());
+
+        let c = node_with(ChainState::new(D), Vec::new(), "10.0.0.6:18444");
+        let r = gossip_round(&addr_b, &c).expect("gossip round");
+        assert_eq!(r.pulled, 3);
+        assert_eq!(r.pushed, 0);
+        assert_eq!(r.their_height, 3);
+        assert_eq!(c.best_height(), 3);
+        assert_eq!(c.chain.lock().unwrap().tip_hash, tip_b);
+    }
+
+    #[test]
+    fn addr_propagation_via_getaddr() {
+        // B already knows A. C dials B: C must learn A's addr from B's book
+        // (GETADDR), and B must learn C's addr (C's announcement).
+        let (st, empty) = (ChainState::new(D), Vec::<Block>::new());
+        let a = node_with(st, empty, "10.0.0.1:18444"); // only referenced by addr
+        let a_addr = a.listen.clone();
+
+        let b = node_with(ChainState::new(D), Vec::new(), "10.0.0.2:18444");
+        b.book.lock().unwrap().merge(&a_addr, now_unix());
+        let addr_b = spawn_server(b.clone());
+
+        let c = node_with(ChainState::new(D), Vec::new(), "10.0.0.3:18444");
+        let r = gossip_round(&addr_b, &c).expect("round C→B");
+        assert_eq!(r.learned, 1, "C learns exactly A");
+        assert!(c.book.lock().unwrap().addrs().contains(&a_addr));
+        assert!(b.book.lock().unwrap().addrs().contains(&"10.0.0.3:18444".to_string()));
+    }
+
+    #[test]
+    fn gossiper_loop_converges_two_nodes() {
+        // A serves continuously; B's gossiper loop (seeds = [A]) must pull
+        // A's chain until the tips match, then stay quiet.
+        let (st_a, blocks_a) = mined_chain(2);
+        let tip_a = st_a.tip_hash.clone();
+        let a = node_with(st_a, blocks_a, "127.0.0.1:2");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr_a = listener.local_addr().expect("addr").to_string();
+        let a_srv = a.clone();
+        std::thread::spawn(move || {
+            // multiple rounds will dial: serve until process ends
+            for s in listener.incoming() {
+                let st = a_srv.clone();
+                std::thread::spawn(move || {
+                    let _ = handle_conn(s.expect("sock"), &st);
+                });
+            }
+        });
+
+        let b = node_with(ChainState::new(D), Vec::new(), "127.0.0.1:3");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let b2 = b.clone();
+        let seeds = vec![addr_a.clone()];
+        let handle = std::thread::spawn(move || {
+            gossiper_loop(seeds, b2, Duration::from_millis(25), stop2);
+        });
+
+        // wait (bounded) for convergence
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while b.best_height() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+
+        assert_eq!(b.best_height(), 2, "gossiper loop must converge to A's tip");
+        assert_eq!(b.chain.lock().unwrap().tip_hash, tip_a);
+    }
+
+    #[test]
+    fn bad_push_block_is_rejected() {
+        // A pushes a garbage block to B: B must reject it (BadBlock) and its
+        // chain must stay untouched.
+        let b = node_with(ChainState::new(D), Vec::new(), "10.0.0.5:18444");
+        let junk = fake_block(1, ""); // no PoW, wrong chaining
+        let err = b.apply_incoming(&junk).unwrap_err();
+        assert!(matches!(err, NetError::BadBlock(_)));
+        assert_eq!(b.best_height(), 0);
+        assert!(b.blocks.lock().unwrap().is_empty());
     }
 }

@@ -1,10 +1,8 @@
 //! pqbit-node — lightweight post-quantum Bitcoin testnet node (Hartwell Labs).
 //!
-//! Phase-3 CLI adds `serve`: a p2p peer that shares its chain for pull-sync.
-//!
-//! Phase-2 CLI: mine a toy chain, validate it. Phase 3 in progress: p2p
-//! (framing + handshake + pull sync in net.rs); gossip/addr manager next.
-//! Everything here is honest, local and PQ-verified.
+//! Phase-3 CLI adds `serve`: a gossiping p2p peer. It mines its chain, then
+//! exchanges addr books and blocks with peers it dials (seeds) — pull when
+//! they are taller, push when we are, every block PQ-validated on arrival.
 
 mod chain;
 mod net;
@@ -12,6 +10,7 @@ mod net;
 use chain::{mine_block, Block, ChainState};
 use clap::{Parser, Subcommand};
 use pqbit_core::{generate_pq_keypair, SigAlgo};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "pqbit-node", about = "Post-quantum Bitcoin testnet node (Hartwell Labs)", version)]
@@ -33,7 +32,7 @@ enum Cmd {
     },
     /// Verify the PQ signing machinery end-to-end (keygen → sign → verify)
     SelfTest,
-    /// Mine a local chain and serve it for pull-sync: `pqbit-node serve`
+    /// Mine a local chain and gossip with peers: `pqbit-node serve --seed 127.0.0.1:18445`
     Serve {
         #[arg(long, default_value_t = 5)]
         blocks: u64,
@@ -43,6 +42,12 @@ enum Cmd {
         reward: u64,
         #[arg(long, default_value = "127.0.0.1:18444")]
         listen: String,
+        /// Peer address to gossip with (repeatable)
+        #[arg(long = "seed")]
+        seeds: Vec<String>,
+        /// Gossip interval in seconds
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
     },
 }
 
@@ -93,8 +98,8 @@ fn main() {
             println!("ML-DSA-44 keygen/sign/verify: {}", if ok { "PASS" } else { "FAIL" });
             std::process::exit(if ok { 0 } else { 1 });
         }
-        Cmd::Serve { blocks, difficulty, reward, listen } => {
-            println!("pqbit-node :: p2p peer (phase 3 scaffold — pull sync)");
+        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval } => {
+            println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
             println!("  mining {} blocks @ {} bits, serving on {}", blocks, difficulty, listen);
             println!();
             let mut st = ChainState::new(difficulty);
@@ -119,9 +124,31 @@ fn main() {
             }
             println!();
             println!("  serving   : {listen}  (magic={:#010x}, wire v{})", net::MAGIC, net::VERSION);
-            println!("  peers can : handshake, ping, GetBlocks → full blocks");
+            if !seeds.is_empty() {
+                println!("  gossiping : {} @ {}s interval", seeds.join(", "), interval);
+            }
+            println!("  peers can : handshake, ping, GetBlocks, GetAddr, push blocks");
+
+            let state = net::NodeState {
+                listen: listen.clone(),
+                reward,
+                blocks: Arc::clone(&store),
+                chain: std::sync::Arc::new(std::sync::Mutex::new(st)),
+                book: std::sync::Arc::new(std::sync::Mutex::new(net::AddrBook::new())),
+            };
+            // background gossiper (seeds + learned addrs) while we accept peers
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if !seeds.is_empty() {
+                let g = state.clone();
+                let s2 = seeds.clone();
+                let stop2 = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    net::gossiper_loop(s2, g, std::time::Duration::from_secs(interval), stop2);
+                });
+            }
             let listener = std::net::TcpListener::bind(&listen).expect("bind");
-            net::serve(listener, store).expect("serve loop");
+            let _ = net::serve(listener, state); // runs until process ends
+            let _ = stop;
         }
     }
 }

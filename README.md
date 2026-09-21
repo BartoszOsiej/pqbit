@@ -50,9 +50,9 @@ $ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
   status     : OK — PoW + PQ coinbase committed
 ```
 
-**Phase 3 (started): peer-to-peer scaffold — length-prefixed framing with a 4 MiB cap, magic/version handshake, Ping/Pong liveness, and full-block **pull sync**: `pqbit-node serve` mines a local chain and serves it; a peer connects, handshakes, `GetBlocks` → applies blocks and lands on our tip (PQ-validated end-to-end; std-only, no new dependencies). Wire spec is the code: explicit field-order codecs in `node/src/net.rs`.
+**Phase 3 (in progress): peer-to-peer — length-prefixed framing with a 4 MiB cap, magic/version handshake, Ping/Pong liveness, full-block pull sync, and now **gossip**: an addr manager (`GETADDR`/`ADDR` + self-announcement, so one seed reveals the mesh) and push/pull relay — `pqbit-node serve --seed host:port` mines a local chain, then exchanges addr books and blocks with peers on a timer: pull when they are taller, push when we are. Every arriving block goes through the full PQ chain validation before it touches our tip (15 tests incl. an end-to-end two-node convergence test; std-only, no new dependencies). Wire spec is the code: explicit field-order codecs in `node/src/net.rs`.
 
-**Next:** addr manager + block push relay (gossip), reorg handling, explorator, whitepaper. Found a real bug with us: the first coinbase design collided txids across blocks (height lived in the uncommitted signature field) — caught by the double-spend test, fixed by committing height in the prevout.
+**Next:** reorg handling, transaction relay (mempool), explorer, whitepaper. Found a real bug with us: the first coinbase design collided txids across blocks (height lived in the uncommitted signature field) — caught by the double-spend test, fixed by committing height in the prevout.
 
 ## Quick start
 
