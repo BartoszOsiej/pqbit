@@ -808,22 +808,27 @@ pub fn mine_one(
     difficulty: u32,
     max_nonce: u64,
 ) -> Result<Block, NetError> {
-    let mut chain = state.chain.lock().expect("chain poisoned");
-    let txs: Vec<pqbit_core::Transaction> = state
-        .pool
-        .lock()
-        .expect("pool poisoned")
-        .txs()
-        .into_iter()
-        .cloned()
-        .collect();
+    // Snapshot the template under a SHORT lock — the PoW loop itself runs
+    // lock-free so network handling is never starved by mining.
+    let (tip_height, tip_hash, txs) = {
+        let chain = state.chain.lock().expect("chain poisoned");
+        let txs: Vec<pqbit_core::Transaction> = state
+            .pool
+            .lock()
+            .expect("pool poisoned")
+            .txs()
+            .into_iter()
+            .cloned()
+            .collect();
+        (chain.tip_height, chain.tip_hash.clone(), txs)
+    };
     let blk = Block {
-        height: chain.tip_height + 1,
-        prev_hash: chain.tip_hash.clone(),
+        height: tip_height + 1,
+        prev_hash: tip_hash,
         timestamp: now_unix(),
         transactions: {
             let mut v = Vec::with_capacity(txs.len() + 1);
-            v.push(coinbase((*state.miner_key).clone(), state.reward, chain.tip_height + 1));
+            v.push(coinbase((*state.miner_key).clone(), state.reward, tip_height + 1));
             v.extend(txs);
             v
         },
@@ -832,6 +837,14 @@ pub fn mine_one(
     let mined = mine_block(blk, difficulty, max_nonce).ok_or(NetError::Io(
         std::io::Error::other("mining budget exhausted"),
     ))?;
+    // Re-validate under the lock: the tip may have moved while we mined
+    // (a peer block won the race) — then our block is simply stale, drop it.
+    let mut chain = state.chain.lock().expect("chain poisoned");
+    if chain.tip_height + 1 != mined.height || chain.tip_hash != mined.prev_hash {
+        return Err(NetError::Io(std::io::Error::other(
+            "stale block: tip moved while mining",
+        )));
+    }
     chain
         .apply_block(&mined, state.reward)
         .map_err(NetError::BadBlock)?;
