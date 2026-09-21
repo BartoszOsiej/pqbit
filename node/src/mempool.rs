@@ -172,6 +172,12 @@ impl Mempool {
     }
 }
 
+/// Decode a single tx payload (as written by `encode_tx` — e.g. the `send --out` file).
+pub fn decode_tx(d: &[u8]) -> Result<Transaction, super::net::NetError> {
+    let mut r = Reader::new(d);
+    r.tx()
+}
+
 use super::net::{NetError, MAX_MSG};
 
 struct Reader<'a> {

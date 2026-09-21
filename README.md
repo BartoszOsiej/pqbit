@@ -59,16 +59,24 @@ $ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
 ```bash
 git clone https://github.com/BartoszOsiej/pqbit
 cd pqbit
-cargo test --release          # 24 tests: core, chain, p2p, mempool
+cargo test --release          # 24 tests: core, chain, p2p, mempool, wallet cycle
 
 # generate a wallet (payout address + signing key):
 cargo run -p pqbit --bin pqbit-node -- wallet --write
 
-# check a balance against an exported UTXO set:
-cargo run -p pqbit --bin pqbit-node -- serve --blocks 3 --difficulty 8 \
-  --listen 127.0.0.1:18444 --dump-utxos utxos.txt
+# mine to YOUR address, export the UTXO set, check the balance:
+cargo run -p pqbit --bin pqbit-node -- mine --blocks 3 --difficulty 12 \
+  --payout <public-key-hex> --dump-utxos utxos.txt --extended
 cargo run -p pqbit --bin pqbit-node -- balance \
   --address <public-key-hex> --utxos utxos.txt
+
+# sign a spend of an owned UTXO (self-verifies the signature before writing):
+cargo run -p pqbit --bin pqbit-node -- send \
+  --pk pqbit.pk --sk pqbit.sk --owned utxos.txt \
+  --to <recipient-pubkey-hex> --out tx.hex
+
+# validate a signed tx against the UTXO set (future RPC injection point):
+cargo run -p pqbit --bin pqbit-node -- submit --tx tx.hex --utxos utxos.txt
 
 # run a node that mines and gossips:
 cargo run -p pqbit --bin pqbit-node -- serve \
