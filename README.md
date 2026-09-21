@@ -82,6 +82,9 @@ cargo run -p pqbit --bin pqbit-node -- submit --tx tx.hex --utxos utxos.txt
 # next mined block packs it (end-to-end transfer):
 cargo run -p pqbit --bin pqbit-node -- broadcast --addr 127.0.0.1:18444 --tx tx.hex
 
+# mempool relay is automatic: any peer gossiping with the node pulls the
+# pending tx into its own mempool within one interval (live-verified)
+
 # run a node that mines and gossips:
 cargo run -p pqbit --bin pqbit-node -- serve \
   --blocks 5 --difficulty 12 --listen 127.0.0.1:18444 --keep-mining
