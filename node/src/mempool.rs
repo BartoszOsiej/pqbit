@@ -139,6 +139,13 @@ impl Mempool {
         }
     }
 
+    /// Drain every pooled tx that appears in a mined block (and conflicts).
+    pub fn remove_mined_txs(&mut self, block: &crate::chain::Block) {
+        for tx in &block.transactions {
+            self.remove_mined(tx);
+        }
+    }
+
     /// Wire codec: u32 count + count × tx payloads.
     pub fn encode_all(txs: &[&Transaction]) -> Vec<u8> {
         let mut o = Vec::new();

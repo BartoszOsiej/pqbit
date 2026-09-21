@@ -10,15 +10,19 @@
 //!   6. push/pull GOSSIP rounds: a node taller than its peer pushes blocks,
 //!      a node shorter than its peer pulls them — every block is PQ-validated
 //!      before it touches our chain,
-//!   7. a background gossiper loop running connect-sync-disconnect rounds.
+//!   7. mempool relay: TX / GETMEMPOOL / MEMPOOL — a gossip round also syncs
+//!      the transaction pool (every tx ML-DSA-validated before admission),
+//!   8. `mine_one`: mine a fresh block on the current tip packing pooled
+//!      transactions — the primitive behind `serve --keep-mining`.
 //!
 //! Deliberately NOT here yet: persistent connections, unsolicited re-relay
 //! (periodic rounds propagate instead — bounded traffic), NAT traversal,
-//! reorg handling, rate limiting. Boring, auditable, std-only.
+//! reorg handling, fee policy. Boring, auditable, std-only.
 
 #![allow(dead_code)]
 
-use crate::chain::{ChainState, NodeError, Block};
+use crate::chain::{mine_block, coinbase, ChainState, NodeError, Block};
+use crate::mempool::Mempool;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -29,7 +33,7 @@ use std::time::Duration;
 /// Protocol magic: "PQBT".
 pub const MAGIC: u32 = 0x5051_4254;
 /// Wire protocol version (bump on breaking change).
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Hard cap for a single framed message (4 MiB; a full PQ block is far below).
 pub const MAX_MSG: usize = 4 * 1024 * 1024;
 /// Per-read timeout; a silent peer gets dropped instead of pinned.
@@ -46,6 +50,9 @@ pub const MSG_GETBLOCKS: u8 = 0x04;
 pub const MSG_BLOCKS: u8 = 0x05;
 pub const MSG_GETADDR: u8 = 0x06;
 pub const MSG_ADDR: u8 = 0x07;
+pub const MSG_TX: u8 = 0x08;
+pub const MSG_GETMEMPOOL: u8 = 0x09;
+pub const MSG_MEMPOOL: u8 = 0x0A;
 
 /// Errors the p2p layer can surface.
 #[derive(Debug)]
@@ -413,6 +420,10 @@ pub struct NodeState {
     pub chain: Arc<Mutex<ChainState>>,
     /// Known peer addresses.
     pub book: Arc<Mutex<AddrBook>>,
+    /// Unconfirmed transaction pool.
+    pub pool: Arc<Mutex<Mempool>>,
+    /// Coinbase paying key (mining + announce identity).
+    pub miner_key: Arc<Vec<u8>>,
 }
 
 impl NodeState {
@@ -511,6 +522,24 @@ pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetEr
                     state.apply_incoming(b)?;
                 }
             }
+            MSG_TX => {
+                let txs = Mempool::decode_all(&m.payload)?;
+                let mut pool = state.pool.lock().expect("pool poisoned");
+                let chain = state.chain.lock().expect("chain poisoned");
+                for tx in &txs {
+                    // admission errors are fine: duplicates/conflicts happen
+                    // in every healthy network; a *signature* failure here is
+                    // also not fatal for the connection (tx-level rejection).
+                    let _ = pool.accept(tx, &chain);
+                }
+            }
+            MSG_GETMEMPOOL => {
+                let payload = {
+                    let pool = state.pool.lock().expect("pool poisoned");
+                    Mempool::encode_all(&pool.txs())
+                };
+                write_message(&mut stream, MSG_MEMPOOL, &payload)?;
+            }
             other => return Err(NetError::UnknownMsg(other)),
         }
     }
@@ -548,6 +577,8 @@ pub struct GossipRound {
     pub pushed: usize,
     /// New addresses learned from the peer's book.
     pub learned: usize,
+    /// New transactions admitted into our pool from the peer.
+    pub txs: usize,
 }
 
 /// One connect-sync-disconnect round against `peer`:
@@ -566,6 +597,10 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
     if magic != MAGIC {
         return Err(NetError::BadMagic);
     }
+    let mut round = GossipRound {
+        their_height,
+        ..Default::default()
+    };
 
     // 1. announce ourselves so the peer's book grows (mesh formation)
     let announce = [state.listen.clone()];
@@ -576,7 +611,6 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
     if m.kind != MSG_ADDR {
         return Err(NetError::UnknownMsg(m.kind));
     }
-    let mut learned = 0usize;
     {
         let mut book = state.book.lock().expect("book poisoned");
         let now = now_unix();
@@ -585,18 +619,13 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
                 continue;
             }
             if book.merge(&a, now) {
-                learned += 1;
+                round.learned += 1;
             }
         }
     }
 
-    let mut round = GossipRound {
-        their_height,
-        learned,
-        ..Default::default()
-    };
-
-    // 3. sync: pull if they are taller, push if we are
+    // 3. sync blocks FIRST: a tx can only validate against a UTXO set that
+    // already contains its prevout, so chain sync precedes mempool relay.
     if their_height > our_height {
         write_message(&mut s, MSG_GETBLOCKS, &encode_u64(our_height))?;
         let m = read_message(&mut s)?;
@@ -622,6 +651,29 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
             round.pushed = blocks.len();
         }
     }
+
+    // 4. mempool relay: broadcast ours, fetch theirs (every tx validated on
+    // admission; duplicates/conflicts are normal noise, not errors)
+    let ours_payload = {
+        let pool = state.pool.lock().expect("pool poisoned");
+        Mempool::encode_all(&pool.txs())
+    };
+    write_message(&mut s, MSG_TX, &ours_payload)?;
+    write_message(&mut s, MSG_GETMEMPOOL, &[])?;
+    let m = read_message(&mut s)?;
+    if m.kind != MSG_MEMPOOL {
+        return Err(NetError::UnknownMsg(m.kind));
+    }
+    {
+        let mut pool = state.pool.lock().expect("pool poisoned");
+        let chain = state.chain.lock().expect("chain poisoned");
+        for tx in Mempool::decode_all(&m.payload)? {
+            if pool.accept(&tx, &chain).is_ok() {
+                round.txs += 1;
+            }
+        }
+    }
+
     Ok(round)
 }
 
@@ -643,18 +695,68 @@ pub fn gossiper_loop(seeds: Vec<String>, state: NodeState, interval: Duration, s
             }
             match gossip_round(&peer, &state) {
                 Ok(r) => {
-                    if r.pulled > 0 || r.pushed > 0 || r.learned > 0 {
+                    if r.pulled > 0 || r.pushed > 0 || r.learned > 0 || r.txs > 0 {
                         eprintln!(
-                            "pqbit-net: gossip {peer}: +{} pulled, {} pushed, {} addrs learned (their tip {})",
-                            r.pulled, r.pushed, r.learned, r.their_height
+                            "pqbit-net: gossip {peer}: +{} pulled, {} pushed, {} addrs, +{} txs (their tip {})",
+                            r.pulled, r.pushed, r.learned, r.txs, r.their_height
                         );
                     }
                 }
                 Err(e) => eprintln!("pqbit-net: gossip {peer} failed: {e}"),
+                // (success log handled above)
             }
         }
         std::thread::sleep(interval);
     }
+}
+
+// ---------------------------------------------------------------------------
+// mining
+// ---------------------------------------------------------------------------
+
+/// Mine one block on the current tip, packing every pooled transaction
+/// (coinbase first). On success the pool is drained of the mined txs.
+/// Returns the mined block. This is the primitive behind `--keep-mining`:
+/// founder and everyone else mine by the same rules after genesis.
+pub fn mine_one(
+    state: &NodeState,
+    difficulty: u32,
+    max_nonce: u64,
+) -> Result<Block, NetError> {
+    let mut chain = state.chain.lock().expect("chain poisoned");
+    let txs: Vec<pqbit_core::Transaction> = state
+        .pool
+        .lock()
+        .expect("pool poisoned")
+        .txs()
+        .into_iter()
+        .cloned()
+        .collect();
+    let blk = Block {
+        height: chain.tip_height + 1,
+        prev_hash: chain.tip_hash.clone(),
+        timestamp: now_unix(),
+        transactions: {
+            let mut v = Vec::with_capacity(txs.len() + 1);
+            v.push(coinbase((*state.miner_key).clone(), state.reward, chain.tip_height + 1));
+            v.extend(txs);
+            v
+        },
+        nonce: 0,
+    };
+    let mined = mine_block(blk, difficulty, max_nonce).ok_or(NetError::Io(
+        std::io::Error::other("mining budget exhausted"),
+    ))?;
+    chain
+        .apply_block(&mined, state.reward)
+        .map_err(NetError::BadBlock)?;
+    state
+        .blocks
+        .lock()
+        .expect("store poisoned")
+        .push(mined.clone());
+    state.pool.lock().expect("pool poisoned").remove_mined_txs(&mined);
+    Ok(mined)
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +850,8 @@ mod tests {
             blocks: Arc::new(Mutex::new(blocks)),
             chain: Arc::new(Mutex::new(chain)),
             book: Arc::new(Mutex::new(AddrBook::new())),
+            pool: Arc::new(Mutex::new(Mempool::new())),
+            miner_key: Arc::new(vec![0xAB; 1312]),
         }
     }
 
@@ -942,6 +1046,128 @@ mod tests {
 
         assert_eq!(b.best_height(), 2, "gossiper loop must converge to A's tip");
         assert_eq!(b.chain.lock().unwrap().tip_hash, tip_a);
+    }
+
+    #[test]
+    fn mempool_relays_over_wire() {
+        // A mines a chain with a KNOWN key, pools a signed spend, then runs a
+        // gossip round against empty B. B's pool must end up holding the tx.
+        use pqbit_core::{sign_pq, TxIn, TxOut};
+
+        let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+        let (st_a, blocks_a) = {
+            let mut st = ChainState::new(D);
+            let blk = Block {
+                height: 1,
+                prev_hash: String::new(),
+                timestamp: 1_700_000_000,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st.apply_block(&mined, REWARD).expect("apply");
+            (st, vec![mined])
+        };
+        let a = node_with(st_a, blocks_a, "10.0.0.11:18444");
+
+        // signed spend of the coinbase UTXO
+        let ((txid, vout), (value, _)) = a
+            .chain
+            .lock()
+            .unwrap()
+            .utxos
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        let mut tx = pqbit_core::Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                prev_txid: hex::decode(&txid).unwrap().try_into().unwrap(),
+                vout,
+                signature: vec![],
+            }],
+            outputs: vec![TxOut {
+                value,
+                pubkey: vec![0xEE; 1312],
+            }],
+            locktime: 0,
+        };
+        tx.inputs[0].signature =
+            sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).expect("sign");
+        a.pool.lock().unwrap().accept(&tx, &a.chain.lock().unwrap()).expect("pool A");
+
+        let b = node_with(ChainState::new(D), Vec::new(), "10.0.0.12:18444");
+        let addr_b = spawn_server(b.clone());
+
+        let r = gossip_round(&addr_b, &a).expect("round");
+        assert_eq!(r.pushed, 1, "A is taller: pushes its block");
+
+        // Push is fire-and-forget: B's handler applies the block and admits
+        // the relayed txs async. Wait (bounded) for both to land.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (b.best_height() < 1 || b.pool.lock().unwrap().is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(b.best_height(), 1, "B applied the pushed block");
+        assert_eq!(b.pool.lock().unwrap().len(), 1, "tx relayed over wire");
+    }
+
+    #[test]
+    fn mine_one_packs_pool_and_drains() {
+        // Known-key chain, one pooled spend → mine_one must produce a block
+        // containing coinbase + spend, apply it, and drain the pool.
+        use pqbit_core::{sign_pq, TxIn, TxOut};
+
+        let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+        let (st, blocks) = {
+            let mut st = ChainState::new(D);
+            let blk = Block {
+                height: 1,
+                prev_hash: String::new(),
+                timestamp: 1_700_000_000,
+                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                nonce: 0,
+            };
+            let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
+            st.apply_block(&mined, REWARD).expect("apply");
+            (st, vec![mined])
+        };
+        let mut n = node_with(st, blocks, "10.0.0.13:18444");
+        n.miner_key = Arc::new(kp.public_key.bytes.clone());
+
+        let ((txid, vout), (value, _)) = n
+            .chain
+            .lock()
+            .unwrap()
+            .utxos
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        let mut tx = pqbit_core::Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                prev_txid: hex::decode(&txid).unwrap().try_into().unwrap(),
+                vout,
+                signature: vec![],
+            }],
+            outputs: vec![TxOut {
+                value,
+                pubkey: vec![0x77; 1312],
+            }],
+            locktime: 0,
+        };
+        tx.inputs[0].signature =
+            sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).expect("sign");
+        n.pool.lock().unwrap().accept(&tx, &n.chain.lock().unwrap()).expect("pool");
+
+        let blk = mine_one(&n, D, 2_000_000).expect("mine_one");
+        assert_eq!(blk.transactions.len(), 2, "coinbase + pooled spend");
+        assert_eq!(n.best_height(), 2);
+        assert!(n.pool.lock().unwrap().is_empty(), "pool drained after mining");
     }
 
     #[test]

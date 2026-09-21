@@ -49,6 +49,9 @@ enum Cmd {
         /// Gossip interval in seconds
         #[arg(long, default_value_t = 10)]
         interval: u64,
+        /// Keep mining new blocks on the tip forever (packs mempool txs)
+        #[arg(long, default_value_t = false)]
+        keep_mining: bool,
     },
 }
 
@@ -99,7 +102,7 @@ fn main() {
             println!("ML-DSA-44 keygen/sign/verify: {}", if ok { "PASS" } else { "FAIL" });
             std::process::exit(if ok { 0 } else { 1 });
         }
-        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval } => {
+        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining } => {
             println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
             println!("  mining {} blocks @ {} bits, serving on {}", blocks, difficulty, listen);
             println!();
@@ -136,7 +139,27 @@ fn main() {
                 blocks: Arc::clone(&store),
                 chain: std::sync::Arc::new(std::sync::Mutex::new(st)),
                 book: std::sync::Arc::new(std::sync::Mutex::new(net::AddrBook::new())),
+                pool: std::sync::Arc::new(std::sync::Mutex::new(mempool::Mempool::new())),
+                miner_key: Arc::new(kp.public_key.bytes.clone()),
             };
+            if keep_mining {
+                println!("  mining    : continuous (packs mempool txs, reward to our key)");
+                let m = state.clone();
+                std::thread::spawn(move || loop {
+                    match net::mine_one(&m, difficulty, 200_000_000) {
+                        Ok(b) => {
+                            eprintln!(
+                                "pqbit-mine: block {}  txs={}  tip={}…",
+                                b.height,
+                                b.transactions.len() - 1,
+                                &b.hash()[..16]
+                            );
+                        }
+                        Err(e) => eprintln!("pqbit-mine: {e}"),
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                });
+            }
             // background gossiper (seeds + learned addrs) while we accept peers
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             if !seeds.is_empty() {
