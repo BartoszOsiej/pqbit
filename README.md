@@ -64,6 +64,12 @@ cargo test --release          # 24 tests: core, chain, p2p, mempool
 # generate a wallet (payout address + signing key):
 cargo run -p pqbit --bin pqbit-node -- wallet --write
 
+# check a balance against an exported UTXO set:
+cargo run -p pqbit --bin pqbit-node -- serve --blocks 3 --difficulty 8 \
+  --listen 127.0.0.1:18444 --dump-utxos utxos.txt
+cargo run -p pqbit --bin pqbit-node -- balance \
+  --address <public-key-hex> --utxos utxos.txt
+
 # run a node that mines and gossips:
 cargo run -p pqbit --bin pqbit-node -- serve \
   --blocks 5 --difficulty 12 --listen 127.0.0.1:18444 --keep-mining

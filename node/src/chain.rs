@@ -132,6 +132,24 @@ impl ChainState {
         }
     }
 
+    /// Total spendable value owned by `pubkey` (sum of UTXOs paying to it).
+    pub fn balance_of(&self, pubkey: &[u8]) -> u64 {
+        self.utxos
+            .values()
+            .filter(|(_, pk)| pk.as_slice() == pubkey)
+            .map(|(v, _)| *v)
+            .sum()
+    }
+
+    /// (txid, vout, value) list of UTXOs owned by `pubkey`.
+    pub fn utxos_of(&self, pubkey: &[u8]) -> Vec<((String, u32), u64)> {
+        self.utxos
+            .iter()
+            .filter(|(_, (_, pk))| pk.as_slice() == pubkey)
+            .map(|((txid, vout), (v, _))| ((txid.clone(), *vout), *v))
+            .collect()
+    }
+
     /// Append a validated block: PoW, chaining, coinbase, every spend PQ-verified.
     pub fn apply_block(&mut self, block: &Block, reward: u64) -> Result<(), NodeError> {
         // 1. chaining

@@ -43,6 +43,17 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         write: bool,
     },
+    /// Show balance for a payout address (public key hex) by scanning an
+    /// UTXO-export file (plain text, one `value pubkey_hex` per line; written
+    /// by `serve --dump-utxos` at shutdown — no serde, per repo rules).
+    Balance {
+        /// Public key hex (the payout address)
+        #[arg(long)]
+        address: String,
+        /// UTXO export file ("value pubkey_hex" lines)
+        #[arg(long)]
+        utxos: String,
+    },
     /// Mine a local chain and gossip with peers: `pqbit-node serve --seed 127.0.0.1:18445`
     Serve {
         #[arg(long, default_value_t = 5)]
@@ -62,6 +73,9 @@ enum Cmd {
         /// Keep mining new blocks on the tip forever (packs mempool txs)
         #[arg(long, default_value_t = false)]
         keep_mining: bool,
+        /// Dump the UTXO set ("value pubkey_hex" lines) to this file after mining
+        #[arg(long)]
+        dump_utxos: Option<String>,
     },
 }
 
@@ -129,6 +143,24 @@ fn main() {
 key signs spends. Re-run with --write to store as files.");
             }
         }
+        Cmd::Balance { address, utxos } => {
+            let raw = std::fs::read_to_string(&utxos).expect("read utxos file");
+            let mut total = 0u64;
+            let mut count = 0usize;
+            for line in raw.lines() {
+                let mut it = line.split_whitespace();
+                let (v, pk) = (it.next(), it.next());
+                if let (Some(v), Some(pk)) = (v, pk) {
+                    if pk == address {
+                        total += v.parse::<u64>().unwrap_or(0);
+                        count += 1;
+                    }
+                }
+            }
+            println!("address   : {}…", &address[..16.min(address.len())]);
+            println!("utxos     : {count}");
+            println!("balance   : {total} pq-sats");
+        }
         Cmd::SelfTest => {
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
             let msg = b"pqbit selftest";
@@ -137,7 +169,7 @@ key signs spends. Re-run with --write to store as files.");
             println!("ML-DSA-44 keygen/sign/verify: {}", if ok { "PASS" } else { "FAIL" });
             std::process::exit(if ok { 0 } else { 1 });
         }
-        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining } => {
+        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining, dump_utxos } => {
             println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
             println!("  mining {} blocks @ {} bits, serving on {}", blocks, difficulty, listen);
             println!();
@@ -177,6 +209,16 @@ key signs spends. Re-run with --write to store as files.");
                 pool: std::sync::Arc::new(std::sync::Mutex::new(mempool::Mempool::new())),
                 miner_key: Arc::new(kp.public_key.bytes.clone()),
             };
+            if let Some(path) = &dump_utxos {
+                use std::io::Write;
+                let mut f = std::fs::File::create(path).expect("create utxo dump");
+                let chain_now = state.chain.lock().expect("chain poisoned");
+                for (_, (v, pk)) in chain_now.utxos.iter() {
+                    let _ = writeln!(f, "{v} {}", hex::encode(pk));
+                }
+                drop(chain_now);
+                println!("  utxo dump : {path}");
+            }
             if keep_mining {
                 println!("  mining    : continuous (packs mempool txs, reward to our key)");
                 let m = state.clone();
