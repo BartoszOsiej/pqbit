@@ -33,6 +33,16 @@ enum Cmd {
     },
     /// Verify the PQ signing machinery end-to-end (keygen → sign → verify)
     SelfTest,
+    /// Generate a new PQ keypair (a wallet): prints the public key (used as
+    /// the payout address in coinbase/outputs) and the secret key.
+    ///
+    /// Storage is intentionally dumb v1: hex files the user keeps safe.
+    /// A real wallet (encryption, change addresses) comes with phase 4.
+    Wallet {
+        /// Write keys to files instead of stdout (pqbit.pk / pqbit.sk)
+        #[arg(long, default_value_t = false)]
+        write: bool,
+    },
     /// Mine a local chain and gossip with peers: `pqbit-node serve --seed 127.0.0.1:18445`
     Serve {
         #[arg(long, default_value_t = 5)]
@@ -93,6 +103,31 @@ fn main() {
             println!("  chain tip  : {}", &st.tip_hash[..32]);
             println!("  utxos      : {}", st.utxos.len());
             println!("  status     : OK — PoW + PQ coinbase committed");
+        }
+        Cmd::Wallet { write } => {
+            let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
+            if write {
+                use std::io::Write;
+                let mut pk = std::fs::File::create("pqbit.pk").expect("create pk");
+                pk.write_all(hex::encode(&kp.public_key.bytes).as_bytes())
+                    .expect("write pk");
+                let mut sk = std::fs::File::create("pqbit.sk").expect("create sk");
+                sk.write_all(hex::encode(&kp.secret_key.bytes).as_bytes())
+                    .expect("write sk");
+                println!("wrote pqbit.pk (public / payout address) and pqbit.sk (SECRET — keep offline)");
+                println!("chmod 600 pqbit.sk recommended");
+            } else {
+                println!("pqbit wallet (ML-DSA-44 / FIPS 204)");
+                println!();
+                println!("  public key (payout address):");
+                println!("    {}", hex::encode(&kp.public_key.bytes));
+                println!();
+                println!("  secret key (NEVER share; this is the only copy):", );
+                println!("    {}", hex::encode(&kp.secret_key.bytes));
+                println!();
+                println!("usage: the public key hex is what others pay to; the secret
+key signs spends. Re-run with --write to store as files.");
+            }
         }
         Cmd::SelfTest => {
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
