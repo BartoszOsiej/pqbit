@@ -61,6 +61,9 @@ git clone https://github.com/BartoszOsiej/pqbit
 cd pqbit
 cargo test --release          # 24 tests: core, chain, p2p, mempool
 
+# generate a wallet (payout address + signing key):
+cargo run -p pqbit --bin pqbit-node -- wallet --write
+
 # run a node that mines and gossips:
 cargo run -p pqbit --bin pqbit-node -- serve \
   --blocks 5 --difficulty 12 --listen 127.0.0.1:18444 --keep-mining
