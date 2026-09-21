@@ -517,7 +517,7 @@ a{color:inherit}
           </div>
           <div class="flex gap-6">
             <dt class="w-24 shrink-0 text-slate2 tracking-widest text-[11px] uppercase pt-1">Status</dt>
-            <dd>Phase 1: core primitives, CI green</dd>
+            <dd>Phase 3: gossiping p2p testnet node, CI green</dd>
           </div>
         </dl>
       </div>
@@ -772,28 +772,28 @@ a{color:inherit}
       <div class="p-card glow-rust brutal block p-5 reveal">
         <div class="flex items-center justify-between">
           <span class="text-[11px] tracking-widest text-slate2">PHASE_2</span>
-          <span class="tag px-2 py-1">NEXT</span>
+          <span class="tag px-2 py-1">DONE</span>
         </div>
         <h3 class="mt-5 text-[15px] font-bold tracking-tight">Testnet node</h3>
-        <p class="mt-2 text-[11px] leading-relaxed text-slate2">Lightweight full node in Rust: headers, UTXO set, PQ mempool. Public testnet anyone can join with a laptop.</p>
-        <div class="mt-4 flex flex-wrap gap-2"><span class="tag px-2 py-1">IN_DEV</span><span class="tag px-2 py-1">NETWORK</span></div>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate2">Lightweight node in Rust: PoW headers, PQ-validated UTXO set, miner, CLI. Public testnet anyone can join with a laptop.</p>
+        <div class="mt-4 flex flex-wrap gap-2"><span class="tag px-2 py-1">15/15 TESTS</span><span class="tag px-2 py-1">CI GREEN</span></div>
       </div>
       <div class="p-card glow-rust brutal block p-5 reveal">
         <div class="flex items-center justify-between">
-          <span class="text-[11px] tracking-widest text-slate2">PHASE_3</span>
-          <span class="tag px-2 py-1">PLANNED</span>
+          <span class="text-[11px] tracking-widest text-rust font-bold">PHASE_3</span>
+          <span class="tag px-2 py-1">LIVE</span>
         </div>
-        <h3 class="mt-5 text-[15px] font-bold tracking-tight">Genesis parameters</h3>
-        <p class="mt-2 text-[11px] leading-relaxed text-slate2">Supply cap, emission curve, PoW choice — published as a draft for public review before anything launches.</p>
-        <div class="mt-4 flex flex-wrap gap-2"><span class="tag px-2 py-1">DRAFT</span><span class="tag px-2 py-1">OPEN_REVIEW</span></div>
+        <h3 class="mt-5 text-[15px] font-bold tracking-tight">Peer-to-peer network</h3>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate2">Gossiping p2p: addr exchange (one seed reveals the mesh), push/pull block relay, every block PQ-validated on arrival. Next: mempool, reorgs.</p>
+        <div class="mt-4 flex flex-wrap gap-2"><span class="tag px-2 py-1">GOSSIP</span><span class="tag px-2 py-1">STD-ONLY</span></div>
       </div>
       <div class="p-card glow-rust brutal block p-5 reveal">
         <div class="flex items-center justify-between">
           <span class="text-[11px] tracking-widest text-slate2">PHASE_4</span>
           <span class="tag px-2 py-1">DECISION</span>
         </div>
-        <h3 class="mt-5 text-[15px] font-bold tracking-tight">Mainnet genesis</h3>
-        <p class="mt-2 text-[11px] leading-relaxed text-slate2">A public, timestamped fair launch. With kill-criteria agreed in advance: if the network never grows, the project says so and freezes.</p>
+        <h3 class="mt-5 text-[15px] font-bold tracking-tight">Genesis parameters</h3>
+        <p class="mt-2 text-[11px] leading-relaxed text-slate2">Supply cap, emission curve, PoW choice — drafted for public review before a fair, timestamped launch with kill-criteria agreed in advance.</p>
         <div class="mt-4 flex flex-wrap gap-2"><span class="tag px-2 py-1">FAIR_LAUNCH</span><span class="tag px-2 py-1">KILL_CRITERIA</span></div>
       </div>
     </div>
