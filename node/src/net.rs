@@ -21,11 +21,12 @@
 
 #![allow(dead_code)]
 
-use crate::chain::{mine_block, coinbase, ChainState, NodeError, Block};
+use crate::chain::{coinbase, mine_block, Block, ChainState, NodeError};
 use crate::mempool::Mempool;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -351,9 +352,17 @@ pub fn decode_addrs(p: &[u8]) -> Result<Vec<String>, NetError> {
 
 /// Peer address book: addr → last-seen (UNIX secs). Self-announcement plus
 /// GETADDR gossip makes a one-seed node discover the rest of the mesh.
+///
+/// PERSISTENT PEER STORE (Q1 milestone): when built `with_persistence`, the
+/// book survives restarts. Plain-text file, one `last_seen addr` per line —
+/// no serde, per repo rules. Writes are atomic (tmp + rename) and flushed
+/// after every merge batch (and on drop); a corrupt or missing file loads as
+/// an empty book — the mesh re-discovers peers anyway, so fail-open is safe.
 #[derive(Default)]
 pub struct AddrBook {
     map: HashMap<String, u64>,
+    persist_path: Option<PathBuf>,
+    dirty: bool,
 }
 
 impl AddrBook {
@@ -361,25 +370,88 @@ impl AddrBook {
         Self::default()
     }
 
+    /// In-memory book that loads (and later flushes to) `path`.
+    pub fn with_persistence(path: &Path) -> Self {
+        let mut book = Self {
+            map: HashMap::new(),
+            persist_path: Some(path.to_path_buf()),
+            dirty: false,
+        };
+        match std::fs::read_to_string(path) {
+            Ok(raw) => {
+                for line in raw.lines() {
+                    let mut parts = line.splitn(2, ' ');
+                    let (seen, addr) = match (parts.next(), parts.next()) {
+                        (Some(s), Some(a)) if !a.is_empty() => (s, a),
+                        _ => continue, // junk line: skip, don't poison the book
+                    };
+                    let seen: u64 = match seen.parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if Self::addr_sane(addr) && book.map.len() < MAX_BOOK {
+                        book.map.insert(addr.to_string(), seen);
+                    }
+                }
+            }
+            // missing file = first run; unreadable = warn but continue (mesh
+            // re-discovers peers, so an empty book is never fatal)
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                eprintln!("pqbit-net: peer store unreadable ({}): {e}", path.display());
+            }
+            Err(_) => {}
+        }
+        book
+    }
+
+    fn addr_sane(addr: &str) -> bool {
+        !addr.is_empty()
+            && addr.len() <= 64
+            && !addr.contains(char::is_whitespace)
+            && addr.contains(':')
+    }
+
     /// Merge one addr. Returns true if it was new. Rejects junk and, when the
     /// book is full, unknown addrs (known ones just get their last-seen bumped).
     pub fn merge(&mut self, addr: &str, now: u64) -> bool {
-        let ok = !addr.is_empty()
-            && addr.len() <= 64
-            && !addr.contains(char::is_whitespace)
-            && addr.contains(':');
-        if !ok {
+        if !Self::addr_sane(addr) {
             return false;
         }
         if let Some(seen) = self.map.get_mut(addr) {
             *seen = now;
+            self.dirty = true;
             return false;
         }
         if self.map.len() >= MAX_BOOK {
             return false;
         }
         self.map.insert(addr.to_string(), now);
+        self.dirty = true;
         true
+    }
+
+    /// Write the book to disk if it changed. Atomic: tmp file + rename.
+    pub fn flush(&mut self) {
+        let Some(path) = &self.persist_path else {
+            return;
+        };
+        if !self.dirty {
+            return;
+        }
+        let mut body = String::with_capacity(self.map.len() * 32);
+        for (addr, seen) in &self.map {
+            body.push_str(&seen.to_string());
+            body.push(' ');
+            body.push_str(addr);
+            body.push('\n');
+        }
+        let tmp = path.with_extension("txt.tmp");
+        if std::fs::write(&tmp, body)
+            .and_then(|_| std::fs::rename(&tmp, path))
+            .is_ok()
+        {
+            self.dirty = false;
+        }
     }
 
     pub fn addrs(&self) -> Vec<String> {
@@ -392,6 +464,12 @@ impl AddrBook {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+impl Drop for AddrBook {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
@@ -428,10 +506,7 @@ pub struct NodeState {
 
 impl NodeState {
     pub fn best_height(&self) -> u64 {
-        self.chain
-            .lock()
-            .expect("chain poisoned")
-            .tip_height
+        self.chain.lock().expect("chain poisoned").tip_height
     }
 
     /// Store a block that does not extend our tip (a fork sibling). These are
@@ -568,7 +643,7 @@ pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetEr
             Err(NetError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
             {
-                return Ok(()) // silent peer: close politely
+                return Ok(()); // silent peer: close politely
             }
             Err(e) => return Err(e),
         };
@@ -598,6 +673,7 @@ pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetEr
                     }
                     book.merge(&a, now);
                 }
+                book.flush(); // learned addrs survive a restart
             }
             MSG_BLOCKS => {
                 // Unsolicited push from a taller peer. Validate every block;
@@ -673,7 +749,11 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
     s.set_read_timeout(Some(READ_TIMEOUT))?;
 
     let our_height = state.best_height();
-    write_message(&mut s, MSG_HANDSHAKE, &encode_handshake(MAGIC, VERSION, our_height))?;
+    write_message(
+        &mut s,
+        MSG_HANDSHAKE,
+        &encode_handshake(MAGIC, VERSION, our_height),
+    )?;
     let m = read_message(&mut s)?;
     if m.kind != MSG_HANDSHAKE {
         return Err(NetError::UnknownMsg(m.kind));
@@ -686,6 +766,14 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
         their_height,
         ..Default::default()
     };
+
+    // we just talked to this peer: bump its freshness so the persistent
+    // store keeps dialable, recently-alive addrs (and flushes the bump)
+    {
+        let mut book = state.book.lock().expect("book poisoned");
+        book.merge(peer, now_unix());
+        book.flush();
+    }
 
     // 1. announce ourselves so the peer's book grows (mesh formation)
     let announce = [state.listen.clone()];
@@ -707,6 +795,7 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
                 round.learned += 1;
             }
         }
+        book.flush(); // learned addrs survive a restart
     }
 
     // 3. sync blocks FIRST: a tx can only validate against a UTXO set that
@@ -764,7 +853,12 @@ pub fn gossip_round(peer: &str, state: &NodeState) -> Result<GossipRound, NetErr
 
 /// Background gossip loop: periodic rounds to every known peer (seeds first,
 /// then anything learned along the way). Runs until `stop` is set.
-pub fn gossiper_loop(seeds: Vec<String>, state: NodeState, interval: Duration, stop: Arc<AtomicBool>) {
+pub fn gossiper_loop(
+    seeds: Vec<String>,
+    state: NodeState,
+    interval: Duration,
+    stop: Arc<AtomicBool>,
+) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -803,11 +897,7 @@ pub fn gossiper_loop(seeds: Vec<String>, state: NodeState, interval: Duration, s
 /// (coinbase first). On success the pool is drained of the mined txs.
 /// Returns the mined block. This is the primitive behind `--keep-mining`:
 /// founder and everyone else mine by the same rules after genesis.
-pub fn mine_one(
-    state: &NodeState,
-    difficulty: u32,
-    max_nonce: u64,
-) -> Result<Block, NetError> {
+pub fn mine_one(state: &NodeState, difficulty: u32, max_nonce: u64) -> Result<Block, NetError> {
     // Snapshot the template under a SHORT lock — the PoW loop itself runs
     // lock-free so network handling is never starved by mining.
     let (tip_height, tip_hash, txs) = {
@@ -828,7 +918,11 @@ pub fn mine_one(
         timestamp: now_unix(),
         transactions: {
             let mut v = Vec::with_capacity(txs.len() + 1);
-            v.push(coinbase((*state.miner_key).clone(), state.reward, tip_height + 1));
+            v.push(coinbase(
+                (*state.miner_key).clone(),
+                state.reward,
+                tip_height + 1,
+            ));
             v.extend(txs);
             v
         },
@@ -853,7 +947,11 @@ pub fn mine_one(
         .lock()
         .expect("store poisoned")
         .push(mined.clone());
-    state.pool.lock().expect("pool poisoned").remove_mined_txs(&mined);
+    state
+        .pool
+        .lock()
+        .expect("pool poisoned")
+        .remove_mined_txs(&mined);
     Ok(mined)
 }
 
@@ -866,7 +964,11 @@ pub fn mine_one(
 pub fn pull_blocks(addr: &str, from_height: u64) -> Result<(u64, Vec<Block>), NetError> {
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(READ_TIMEOUT))?;
-    write_message(&mut s, MSG_HANDSHAKE, &encode_handshake(MAGIC, VERSION, from_height))?;
+    write_message(
+        &mut s,
+        MSG_HANDSHAKE,
+        &encode_handshake(MAGIC, VERSION, from_height),
+    )?;
     let m = read_message(&mut s)?;
     if m.kind != MSG_HANDSHAKE {
         return Err(NetError::UnknownMsg(m.kind));
@@ -1011,6 +1113,67 @@ mod tests {
     }
 
     #[test]
+    fn peer_store_survives_restart() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pqbit-peers-test-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // "session 1": learn two peers, flush, drop
+        {
+            let mut book = AddrBook::with_persistence(&path);
+            assert!(book.is_empty(), "fresh file = empty book");
+            assert!(book.merge("10.0.0.9:18444", 1_000));
+            assert!(book.merge("10.0.0.8:18445", 2_000));
+            assert!(
+                !book.merge("10.0.0.8:18445", 2_500),
+                "known addr bumps, not adds"
+            );
+            book.flush();
+        }
+
+        // "session 2": a new process loads what session 1 learned
+        {
+            let book = AddrBook::with_persistence(&path);
+            assert_eq!(book.len(), 2, "both peers survive the restart");
+            assert!(book.addrs().contains(&"10.0.0.9:18444".to_string()));
+            assert!(book.addrs().contains(&"10.0.0.8:18445".to_string()));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn peer_store_rejects_junk_and_renders_garbage_harmless() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pqbit-peers-junk-{}.txt", std::process::id()));
+        // corrupt file: junk lines, missing timestamps, insane addrs, valid line
+        std::fs::write(
+            &path,
+            "not a peer line\n9999 bad addr with spaces\n\nabc:1\n777 10.1.1.1:18444\n",
+        )
+        .expect("write junk store");
+        let book = AddrBook::with_persistence(&path);
+        assert_eq!(book.len(), 1, "only the valid line survives");
+        assert!(book.addrs().contains(&"10.1.1.1:18444".to_string()));
+        let _ = std::fs::remove_file(&path);
+
+        // missing parent dir: load is empty, flush fails silently, node keeps running
+        let mut book = AddrBook::with_persistence(Path::new("/nonexistent-dir-peers/x.txt"));
+        assert!(book.is_empty());
+        assert!(book.merge("10.9.9.9:1", 5));
+        book.flush(); // must not panic even though the write fails
+    }
+
+    #[test]
+    fn peer_store_in_memory_book_never_writes() {
+        // default book (no persistence) must stay exactly that: no file I/O
+        let mut book = AddrBook::new();
+        assert!(book.merge("1.1.1.1:1", 1));
+        book.flush(); // no-op without a persist path
+        assert_eq!(book.len(), 1);
+    }
+
+    #[test]
     fn end_to_end_sync_two_nodes() {
         // node A: a real 2-block chain mined with the actual PQ miner
         let (st, store) = mined_chain(2);
@@ -1064,7 +1227,12 @@ mod tests {
         assert_eq!(b.blocks.lock().unwrap().len(), 2);
 
         // B's book grew with A's announced addr
-        assert!(b.book.lock().unwrap().addrs().contains(&"10.0.0.9:18444".to_string()));
+        assert!(b
+            .book
+            .lock()
+            .unwrap()
+            .addrs()
+            .contains(&"10.0.0.9:18444".to_string()));
     }
 
     #[test]
@@ -1101,7 +1269,12 @@ mod tests {
         let r = gossip_round(&addr_b, &c).expect("round C→B");
         assert_eq!(r.learned, 1, "C learns exactly A");
         assert!(c.book.lock().unwrap().addrs().contains(&a_addr));
-        assert!(b.book.lock().unwrap().addrs().contains(&"10.0.0.3:18444".to_string()));
+        assert!(b
+            .book
+            .lock()
+            .unwrap()
+            .addrs()
+            .contains(&"10.0.0.3:18444".to_string()));
     }
 
     #[test]
@@ -1159,7 +1332,11 @@ mod tests {
                 height: 1,
                 prev_hash: String::new(),
                 timestamp: 1_700_000_000,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    1,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1193,7 +1370,11 @@ mod tests {
         };
         tx.inputs[0].signature =
             sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).expect("sign");
-        a.pool.lock().unwrap().accept(&tx, &a.chain.lock().unwrap()).expect("pool A");
+        a.pool
+            .lock()
+            .unwrap()
+            .accept(&tx, &a.chain.lock().unwrap())
+            .expect("pool A");
 
         let b = node_with(ChainState::new(D), Vec::new(), "10.0.0.12:18444");
         let addr_b = spawn_server(b.clone());
@@ -1226,7 +1407,11 @@ mod tests {
                 height: 1,
                 prev_hash: String::new(),
                 timestamp: 1_700_000_000,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    1,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1260,12 +1445,19 @@ mod tests {
         };
         tx.inputs[0].signature =
             sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).expect("sign");
-        n.pool.lock().unwrap().accept(&tx, &n.chain.lock().unwrap()).expect("pool");
+        n.pool
+            .lock()
+            .unwrap()
+            .accept(&tx, &n.chain.lock().unwrap())
+            .expect("pool");
 
         let blk = mine_one(&n, D, 2_000_000).expect("mine_one");
         assert_eq!(blk.transactions.len(), 2, "coinbase + pooled spend");
         assert_eq!(n.best_height(), 2);
-        assert!(n.pool.lock().unwrap().is_empty(), "pool drained after mining");
+        assert!(
+            n.pool.lock().unwrap().is_empty(),
+            "pool drained after mining"
+        );
     }
 
     #[test]
@@ -1282,7 +1474,11 @@ mod tests {
                 height: 1,
                 prev_hash: String::new(),
                 timestamp: 1_700_000_000,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 1)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    1,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1291,13 +1487,17 @@ mod tests {
         };
 
         // our branch: block 2A on top of block 1
-        let mut st_a = st0.clone() ;
+        let mut st_a = st0.clone();
         let b2a = {
             let blk = Block {
                 height: 2,
                 prev_hash: st_a.tip_hash.clone(),
                 timestamp: 1_700_000_100,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 2)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    2,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1316,7 +1516,11 @@ mod tests {
                 height: 2,
                 prev_hash: st_b.tip_hash.clone(),
                 timestamp: 1_700_000_200,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 2)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    2,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1328,7 +1532,11 @@ mod tests {
                 height: 3,
                 prev_hash: st_b.tip_hash.clone(),
                 timestamp: 1_700_000_300,
-                transactions: vec![crate::chain::coinbase(kp.public_key.bytes.clone(), REWARD, 3)],
+                transactions: vec![crate::chain::coinbase(
+                    kp.public_key.bytes.clone(),
+                    REWARD,
+                    3,
+                )],
                 nonce: 0,
             };
             let mined = crate::chain::mine_block(blk, D, 2_000_000).expect("mine");
@@ -1348,7 +1556,10 @@ mod tests {
         let hashes: Vec<String> = n.blocks.lock().unwrap().iter().map(|b| b.hash()).collect();
         assert!(hashes.contains(&b3.hash()));
         assert!(hashes.contains(&b2b.hash()));
-        assert!(!hashes.contains(&b2a.hash()), "orphaned block removed from store");
+        assert!(
+            !hashes.contains(&b2a.hash()),
+            "orphaned block removed from store"
+        );
     }
 
     #[test]

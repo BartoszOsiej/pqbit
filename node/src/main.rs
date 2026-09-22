@@ -14,7 +14,11 @@ use pqbit_core::{generate_pq_keypair, SigAlgo};
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "pqbit-node", about = "Post-quantum Bitcoin testnet node (Hartwell Labs)", version)]
+#[command(
+    name = "pqbit-node",
+    about = "Post-quantum Bitcoin testnet node (Hartwell Labs)",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -114,6 +118,9 @@ enum Cmd {
         /// Peer address to gossip with (repeatable)
         #[arg(long = "seed")]
         seeds: Vec<String>,
+        /// Persistent peer store file (addr book survives restarts)
+        #[arg(long = "peers-file")]
+        peers_file: Option<String>,
         /// Gossip interval in seconds
         #[arg(long, default_value_t = 10)]
         interval: u64,
@@ -135,7 +142,14 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Mine { blocks, difficulty, reward, payout, dump_utxos, extended } => {
+        Cmd::Mine {
+            blocks,
+            difficulty,
+            reward,
+            payout,
+            dump_utxos,
+            extended,
+        } => {
             println!("pqbit-node :: testnet miner");
             println!("  difficulty : {difficulty} leading zero bits");
             println!("  reward     : {reward} pq-sats / block");
@@ -155,7 +169,11 @@ fn main() {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
-                    transactions: vec![chain::coinbase(payout_pk.clone(), reward, st.tip_height + 1)],
+                    transactions: vec![chain::coinbase(
+                        payout_pk.clone(),
+                        reward,
+                        st.tip_height + 1,
+                    )],
                     nonce: 0,
                 };
                 let mined = mine_block(blk, difficulty, 200_000_000).expect("mining budget");
@@ -197,7 +215,9 @@ fn main() {
                 let mut sk = std::fs::File::create("pqbit.sk").expect("create sk");
                 sk.write_all(hex::encode(&kp.secret_key.bytes).as_bytes())
                     .expect("write sk");
-                println!("wrote pqbit.pk (public / payout address) and pqbit.sk (SECRET — keep offline)");
+                println!(
+                    "wrote pqbit.pk (public / payout address) and pqbit.sk (SECRET — keep offline)"
+                );
                 println!("chmod 600 pqbit.sk recommended");
             } else {
                 println!("pqbit wallet (ML-DSA-44 / FIPS 204)");
@@ -205,11 +225,13 @@ fn main() {
                 println!("  public key (payout address):");
                 println!("    {}", hex::encode(&kp.public_key.bytes));
                 println!();
-                println!("  secret key (NEVER share; this is the only copy):", );
+                println!("  secret key (NEVER share; this is the only copy):",);
                 println!("    {}", hex::encode(&kp.secret_key.bytes));
                 println!();
-                println!("usage: the public key hex is what others pay to; the secret
-key signs spends. Re-run with --write to store as files.");
+                println!(
+                    "usage: the public key hex is what others pay to; the secret
+key signs spends. Re-run with --write to store as files."
+                );
             }
         }
         Cmd::Balance { address, utxos } => {
@@ -223,14 +245,16 @@ key signs spends. Re-run with --write to store as files.");
                         let v: u64 = it[0].parse().unwrap_or(0);
                         if let Ok(pk) = hex::decode(it[1]) {
                             // synthetic key: empty txid is fine for balance lookups
-                            st.utxos.insert((String::new(), st.utxos.len() as u32), (v, pk));
+                            st.utxos
+                                .insert((String::new(), st.utxos.len() as u32), (v, pk));
                         }
                     }
                     // extended dump: "value pubkey txid vout"
                     4 => {
                         let v: u64 = it[0].parse().unwrap_or(0);
                         if let Ok(pk) = hex::decode(it[1]) {
-                            st.utxos.insert((it[2].to_string(), it[3].parse().unwrap_or(0)), (v, pk));
+                            st.utxos
+                                .insert((it[2].to_string(), it[3].parse().unwrap_or(0)), (v, pk));
                         }
                     }
                     _ => {}
@@ -243,13 +267,25 @@ key signs spends. Re-run with --write to store as files.");
             println!("utxos     : {count}");
             println!("balance   : {total} pq-sats");
         }
-        Cmd::Send { sk, pk, owned, to, out } => {
-            use pqbit_core::{sign_pq, verify_pq, SigAlgo, TxIn, TxOut, Transaction};
+        Cmd::Send {
+            sk,
+            pk,
+            owned,
+            to,
+            out,
+        } => {
+            use pqbit_core::{sign_pq, verify_pq, SigAlgo, Transaction, TxIn, TxOut};
             use std::io::Write;
 
-            let sk_hex = std::fs::read_to_string(&sk).expect("read sk").trim().to_string();
+            let sk_hex = std::fs::read_to_string(&sk)
+                .expect("read sk")
+                .trim()
+                .to_string();
             let sk_bytes = hex::decode(&sk_hex).expect("sk hex");
-            let pk_hex = std::fs::read_to_string(&pk).expect("read pk (run `wallet --write` first)").trim().to_string();
+            let pk_hex = std::fs::read_to_string(&pk)
+                .expect("read pk (run `wallet --write` first)")
+                .trim()
+                .to_string();
             let to_bytes = hex::decode(&to).expect("to hex");
 
             // first UTXO owned by our pk: extended dump format "value pubkey txid vout"
@@ -258,16 +294,24 @@ key signs spends. Re-run with --write to store as files.");
             for line in raw.lines() {
                 let it: Vec<&str> = line.split_whitespace().collect();
                 if it.len() == 4 && it[1] == pk_hex {
-                    found = Some((it[0].parse().expect("value"), it[2].to_string(), it[3].parse().expect("vout")));
+                    found = Some((
+                        it[0].parse().expect("value"),
+                        it[2].to_string(),
+                        it[3].parse().expect("vout"),
+                    ));
                     break;
                 }
             }
-            let (value, txid_hex, vout) = found.expect("no owned UTXO in file (need --extended dump)");
+            let (value, txid_hex, vout) =
+                found.expect("no owned UTXO in file (need --extended dump)");
 
             let mut tx = Transaction {
                 version: 1,
                 inputs: vec![TxIn {
-                    prev_txid: hex::decode(&txid_hex).expect("txid").try_into().expect("32 bytes"),
+                    prev_txid: hex::decode(&txid_hex)
+                        .expect("txid")
+                        .try_into()
+                        .expect("32 bytes"),
                     vout,
                     signature: vec![],
                 }],
@@ -282,8 +326,13 @@ key signs spends. Re-run with --write to store as files.");
 
             // self-check before writing: the spend must verify against our own pk
             let pk_bytes = hex::decode(&pk_hex).expect("pk hex");
-            let ok = verify_pq(SigAlgo::MlDsa44, &pk_bytes, &tx.sighash(), &tx.inputs[0].signature)
-                .unwrap_or(false);
+            let ok = verify_pq(
+                SigAlgo::MlDsa44,
+                &pk_bytes,
+                &tx.sighash(),
+                &tx.inputs[0].signature,
+            )
+            .unwrap_or(false);
             if !ok {
                 eprintln!("ERROR: signed tx failed self-verification against {pk} — aborting");
                 std::process::exit(1);
@@ -293,14 +342,21 @@ key signs spends. Re-run with --write to store as files.");
             let mut f = std::fs::File::create(&out).expect("create out");
             f.write_all(hex::encode(&wire).as_bytes()).expect("write");
             println!("signed spend:");
-            println!("  spends  : txid {}… vout {vout} ({} pq-sats)", &txid_hex[..16.min(txid_hex.len())], value);
+            println!(
+                "  spends  : txid {}… vout {vout} ({} pq-sats)",
+                &txid_hex[..16.min(txid_hex.len())],
+                value
+            );
             println!("  to      : {}…", &to[..16.min(to.len())]);
             println!("  tx file : {out} (wire hex — inject via a future `submit` RPC)");
         }
         Cmd::Submit { tx, utxos } => {
             use crate::mempool::Mempool;
 
-            let hex_str = std::fs::read_to_string(&tx).expect("read tx file").trim().to_string();
+            let hex_str = std::fs::read_to_string(&tx)
+                .expect("read tx file")
+                .trim()
+                .to_string();
             let wire = hex::decode(&hex_str).expect("tx hex");
             let decoded = mempool::decode_tx(&wire).expect("decode tx");
             let transaction = &decoded;
@@ -323,7 +379,12 @@ key signs spends. Re-run with --write to store as files.");
             match pool.accept(transaction, &st) {
                 Ok(()) => {
                     let txid = hex::encode(transaction.sighash());
-                    println!("tx {}… ACCEPTED ({} input(s), {} output(s)) — valid against UTXO dump", &txid[..16], transaction.inputs.len(), transaction.outputs.len());
+                    println!(
+                        "tx {}… ACCEPTED ({} input(s), {} output(s)) — valid against UTXO dump",
+                        &txid[..16],
+                        transaction.inputs.len(),
+                        transaction.outputs.len()
+                    );
                 }
                 Err(e) => {
                     eprintln!("REJECTED: {e:?}");
@@ -332,49 +393,90 @@ key signs spends. Re-run with --write to store as files.");
             }
         }
         Cmd::Broadcast { addr, tx } => {
-            let hex_str = std::fs::read_to_string(&tx).expect("read tx file").trim().to_string();
+            let hex_str = std::fs::read_to_string(&tx)
+                .expect("read tx file")
+                .trim()
+                .to_string();
             let wire = hex::decode(&hex_str).expect("tx hex");
             // wrap in MEMPOOL-style payload: u32 count + tx payload
             let mut payload = Vec::with_capacity(4 + wire.len());
             payload.extend_from_slice(&1u32.to_le_bytes());
             payload.extend_from_slice(&wire);
 
-            let stream = std::net::TcpStream::connect(&addr)
-                .unwrap_or_else(|e| {
-                    eprintln!("ERROR: cannot connect to {addr}: {e}");
-                    std::process::exit(1);
-                });
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+            let stream = std::net::TcpStream::connect(&addr).unwrap_or_else(|e| {
+                eprintln!("ERROR: cannot connect to {addr}: {e}");
+                std::process::exit(1);
+            });
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .ok();
             let mut stream = stream;
 
             // handshake
-            net::write_message(&mut stream, net::MSG_HANDSHAKE, &net::encode_handshake(net::MAGIC, net::VERSION, 0))
-                .unwrap_or_else(|e| { eprintln!("ERROR: handshake write: {e}"); std::process::exit(1); });
-            let reply = net::read_message(&mut stream)
-                .unwrap_or_else(|e| { eprintln!("ERROR: handshake read: {e}"); std::process::exit(1); });
+            net::write_message(
+                &mut stream,
+                net::MSG_HANDSHAKE,
+                &net::encode_handshake(net::MAGIC, net::VERSION, 0),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("ERROR: handshake write: {e}");
+                std::process::exit(1);
+            });
+            let reply = net::read_message(&mut stream).unwrap_or_else(|e| {
+                eprintln!("ERROR: handshake read: {e}");
+                std::process::exit(1);
+            });
             if reply.kind != net::MSG_HANDSHAKE {
-                eprintln!("ERROR: expected handshake reply, got kind {:#x}", reply.kind);
+                eprintln!(
+                    "ERROR: expected handshake reply, got kind {:#x}",
+                    reply.kind
+                );
                 std::process::exit(1);
             }
 
             // push the tx
-            net::write_message(&mut stream, net::MSG_TX, &payload)
-                .unwrap_or_else(|e| { eprintln!("ERROR: tx push: {e}"); std::process::exit(1); });
-            println!("tx pushed to {addr} ({} bytes wire) — node will validate into mempool", wire.len());
+            net::write_message(&mut stream, net::MSG_TX, &payload).unwrap_or_else(|e| {
+                eprintln!("ERROR: tx push: {e}");
+                std::process::exit(1);
+            });
+            println!(
+                "tx pushed to {addr} ({} bytes wire) — node will validate into mempool",
+                wire.len()
+            );
             // graceful close: drop after flush; node closes on EOF/timeout
             drop(stream);
         }
         Cmd::SelfTest => {
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
             let msg = b"pqbit selftest";
-            let sig = pqbit_core::sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, msg).expect("sign");
-            let ok = pqbit_core::verify_pq(SigAlgo::MlDsa44, &kp.public_key.bytes, msg, &sig).expect("verify");
-            println!("ML-DSA-44 keygen/sign/verify: {}", if ok { "PASS" } else { "FAIL" });
+            let sig =
+                pqbit_core::sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, msg).expect("sign");
+            let ok = pqbit_core::verify_pq(SigAlgo::MlDsa44, &kp.public_key.bytes, msg, &sig)
+                .expect("verify");
+            println!(
+                "ML-DSA-44 keygen/sign/verify: {}",
+                if ok { "PASS" } else { "FAIL" }
+            );
             std::process::exit(if ok { 0 } else { 1 });
         }
-        Cmd::Serve { blocks, difficulty, reward, listen, seeds, interval, keep_mining, payout, dump_utxos, extended } => {
+        Cmd::Serve {
+            blocks,
+            difficulty,
+            reward,
+            listen,
+            seeds,
+            interval,
+            keep_mining,
+            payout,
+            dump_utxos,
+            extended,
+            peers_file,
+        } => {
             println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
-            println!("  mining {} blocks @ {} bits, serving on {}", blocks, difficulty, listen);
+            println!(
+                "  mining {} blocks @ {} bits, serving on {}",
+                blocks, difficulty, listen
+            );
             println!();
             let mut st = ChainState::new(difficulty);
             let kp = generate_pq_keypair(SigAlgo::MlDsa44).expect("keygen");
@@ -392,18 +494,34 @@ key signs spends. Re-run with --write to store as files.");
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
-                    transactions: vec![chain::coinbase(payout_pk.clone(), reward, st.tip_height + 1)],
+                    transactions: vec![chain::coinbase(
+                        payout_pk.clone(),
+                        reward,
+                        st.tip_height + 1,
+                    )],
                     nonce: 0,
                 };
                 let mined = chain::mine_block(blk, difficulty, 200_000_000).expect("mining budget");
                 st.apply_block(&mined, reward).expect("valid block");
                 store.lock().expect("store").push(mined);
-                println!("  block {i:>3}  tip={}…  supply={}", &st.tip_hash[..16], st.total_supply);
+                println!(
+                    "  block {i:>3}  tip={}…  supply={}",
+                    &st.tip_hash[..16],
+                    st.total_supply
+                );
             }
             println!();
-            println!("  serving   : {listen}  (magic={:#010x}, wire v{})", net::MAGIC, net::VERSION);
+            println!(
+                "  serving   : {listen}  (magic={:#010x}, wire v{})",
+                net::MAGIC,
+                net::VERSION
+            );
             if !seeds.is_empty() {
-                println!("  gossiping : {} @ {}s interval", seeds.join(", "), interval);
+                println!(
+                    "  gossiping : {} @ {}s interval",
+                    seeds.join(", "),
+                    interval
+                );
             }
             println!("  peers can : handshake, ping, GetBlocks, GetAddr, push blocks");
 
@@ -412,7 +530,14 @@ key signs spends. Re-run with --write to store as files.");
                 reward,
                 blocks: Arc::clone(&store),
                 chain: std::sync::Arc::new(std::sync::Mutex::new(st)),
-                book: std::sync::Arc::new(std::sync::Mutex::new(net::AddrBook::new())),
+                book: std::sync::Arc::new(std::sync::Mutex::new(match &peers_file {
+                    Some(p) => {
+                        let b = net::AddrBook::with_persistence(std::path::Path::new(p));
+                        println!("  peer store: {p} ({} addrs loaded)", b.len());
+                        b
+                    }
+                    None => net::AddrBook::new(),
+                })),
                 pool: std::sync::Arc::new(std::sync::Mutex::new(mempool::Mempool::new())),
                 miner_key: Arc::new(payout_pk.clone()),
             };
@@ -448,9 +573,11 @@ key signs spends. Re-run with --write to store as files.");
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 });
             }
-            // background gossiper (seeds + learned addrs) while we accept peers
+            // background gossiper (seeds + peer-store entries + learned addrs)
+            // while we accept peers — a persistent peer store alone is enough:
+            // peers learned in a previous run are dial targets too.
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            if !seeds.is_empty() {
+            if !seeds.is_empty() || peers_file.is_some() {
                 let g = state.clone();
                 let s2 = seeds.clone();
                 let stop2 = Arc::clone(&stop);

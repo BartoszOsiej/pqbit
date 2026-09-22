@@ -5,8 +5,8 @@
 //! Bitcoin BIP-360 (P2MR, merged into the BIPs repo February 2026).
 //! Lightweight UTXO model, fair-launch design.
 
-use bitcoinpqc::{Algorithm, PublicKey, SecretKey, Signature};
 pub use bitcoinpqc::KeyPair;
+use bitcoinpqc::{Algorithm, PublicKey, SecretKey, Signature};
 use std::fmt;
 
 /// Signature algorithms supported at genesis. Both are NIST FIPS standards.
@@ -109,10 +109,10 @@ pub fn verify_pq(
     message: &[u8],
     signature: &[u8],
 ) -> Result<bool, PqBitError> {
-    let pk =
-        PublicKey::try_from_slice(algo.algorithm(), pubkey).map_err(|_| PqBitError::MalformedTransaction)?;
-    let sig =
-        Signature::try_from_slice(algo.algorithm(), signature).map_err(|_| PqBitError::MalformedTransaction)?;
+    let pk = PublicKey::try_from_slice(algo.algorithm(), pubkey)
+        .map_err(|_| PqBitError::MalformedTransaction)?;
+    let sig = Signature::try_from_slice(algo.algorithm(), signature)
+        .map_err(|_| PqBitError::MalformedTransaction)?;
     match bitcoinpqc::verify(&pk, message, &sig) {
         Ok(()) => Ok(true),
         Err(_) => Ok(false),
@@ -121,8 +121,8 @@ pub fn verify_pq(
 
 /// Sign a message with a PQ secret key; returns the serialized signature.
 pub fn sign_pq(algo: SigAlgo, secret: &[u8], message: &[u8]) -> Result<Vec<u8>, PqBitError> {
-    let sk =
-        SecretKey::try_from_slice(algo.algorithm(), secret).map_err(|_| PqBitError::MalformedTransaction)?;
+    let sk = SecretKey::try_from_slice(algo.algorithm(), secret)
+        .map_err(|_| PqBitError::MalformedTransaction)?;
     bitcoinpqc::sign(&sk, message)
         .map(|s| s.bytes)
         .map_err(|_| PqBitError::SignatureRejected)

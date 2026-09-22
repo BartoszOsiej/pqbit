@@ -65,9 +65,7 @@ impl Mempool {
 
     /// Validate + admit one transaction.
     pub fn accept(&mut self, tx: &Transaction, chain: &ChainState) -> Result<(), MempoolError> {
-        chain
-            .validate_spend(tx)
-            .map_err(MempoolError::Invalid)?;
+        chain.validate_spend(tx).map_err(MempoolError::Invalid)?;
 
         let txid = hex::encode(tx.sighash());
         if self.txs.contains_key(&txid) {
@@ -310,13 +308,11 @@ mod tests {
                 vout,
                 signature: vec![],
             }],
-            outputs: vec![TxOut {
-                value,
-                pubkey: to,
-            }],
+            outputs: vec![TxOut { value, pubkey: to }],
             locktime: 0,
         };
-        tx.inputs[0].signature = sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).unwrap();
+        tx.inputs[0].signature =
+            sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx.sighash()).unwrap();
         tx
     }
 
@@ -353,7 +349,10 @@ mod tests {
 
         let tx = signed_spend(&kp, &st, vec![0xCD; 1312]);
         pool.accept(&tx, &st).expect("first ok");
-        assert!(matches!(pool.accept(&tx, &st), Err(MempoolError::Duplicate)));
+        assert!(matches!(
+            pool.accept(&tx, &st),
+            Err(MempoolError::Duplicate)
+        ));
 
         // same prevout, different tx (different output) → conflict
         let mut tx2 = tx.clone();
@@ -361,7 +360,10 @@ mod tests {
         // sighash changed → new txid, but inputs identical → conflicting
         tx2.inputs[0].signature =
             sign_pq(SigAlgo::MlDsa44, &kp.secret_key.bytes, &tx2.sighash()).unwrap();
-        assert!(matches!(pool.accept(&tx2, &st), Err(MempoolError::Conflicting)));
+        assert!(matches!(
+            pool.accept(&tx2, &st),
+            Err(MempoolError::Conflicting)
+        ));
     }
 
     #[test]

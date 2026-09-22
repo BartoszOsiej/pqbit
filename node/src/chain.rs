@@ -165,10 +165,7 @@ impl ChainState {
         for (idx, tx) in block.transactions.iter().enumerate() {
             if idx == 0 {
                 // coinbase: no inputs to verify, mints reward
-                let out = tx
-                    .outputs
-                    .first()
-                    .ok_or(NodeError::Overspend)?;
+                let out = tx.outputs.first().ok_or(NodeError::Overspend)?;
                 minted = out.value;
                 if minted > reward {
                     return Err(NodeError::Overspend);
@@ -254,7 +251,8 @@ impl ChainState {
         }
         let txid = hex::encode(sighash);
         for (i, out) in tx.outputs.iter().enumerate() {
-            self.utxos.insert((txid.clone(), i as u32), (out.value, out.pubkey.clone()));
+            self.utxos
+                .insert((txid.clone(), i as u32), (out.value, out.pubkey.clone()));
         }
         Ok(())
     }
@@ -336,7 +334,12 @@ mod tests {
 
         // A spends one UTXO to B with a REAL ML-DSA signature
         let b = generate_pq_keypair(SigAlgo::MlDsa44).unwrap();
-        let ((txid, vout), (value, _)) = st.utxos.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+        let ((txid, vout), (value, _)) = st
+            .utxos
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
         let mut spend = Transaction {
             version: 1,
             inputs: vec![TxIn {
@@ -350,15 +353,18 @@ mod tests {
             }],
             locktime: 0,
         };
-        let sig = pqbit_core::sign_pq(SigAlgo::MlDsa44, &a.secret_key.bytes, &spend.sighash())
-            .unwrap();
+        let sig =
+            pqbit_core::sign_pq(SigAlgo::MlDsa44, &a.secret_key.bytes, &spend.sighash()).unwrap();
         spend.inputs[0].signature = sig;
 
         let blk = Block {
             height: st.tip_height + 1,
             prev_hash: st.tip_hash.clone(),
             timestamp: 1_700_000_100,
-            transactions: vec![coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1), spend],
+            transactions: vec![
+                coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1),
+                spend,
+            ],
             nonce: 0,
         };
         let blk = mine_block(blk, D, 10_000_000).unwrap();
@@ -374,7 +380,12 @@ mod tests {
         st.apply_block(&blk, 50).unwrap();
 
         let b = generate_pq_keypair(SigAlgo::MlDsa44).unwrap();
-        let ((txid, vout), (value, _)) = st.utxos.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+        let ((txid, vout), (value, _)) = st
+            .utxos
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
         let mut spend = Transaction {
             version: 1,
             inputs: vec![TxIn {
@@ -393,7 +404,10 @@ mod tests {
             height: st.tip_height + 1,
             prev_hash: st.tip_hash.clone(),
             timestamp: 1_700_000_200,
-            transactions: vec![coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1), spend],
+            transactions: vec![
+                coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1),
+                spend,
+            ],
             nonce: 0,
         };
         let blk = mine_block(blk, D, 10_000_000).unwrap();
@@ -407,7 +421,12 @@ mod tests {
         let blk = mine_next(&st, a.public_key.bytes.clone(), 50);
         st.apply_block(&blk, 50).unwrap();
 
-        let ((txid, vout), (value, _)) = st.utxos.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+        let ((txid, vout), (value, _)) = st
+            .utxos
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
         let make_spend = |to: &Vec<u8>| {
             let mut tx = Transaction {
                 version: 1,
@@ -435,7 +454,10 @@ mod tests {
             height: st.tip_height + 1,
             prev_hash: st.tip_hash.clone(),
             timestamp: 1_700_000_300,
-            transactions: vec![coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1), s1],
+            transactions: vec![
+                coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1),
+                s1,
+            ],
             nonce: 0,
         };
         let blk1 = mine_block(blk1, D, 10_000_000).unwrap();
@@ -447,7 +469,10 @@ mod tests {
             height: st.tip_height + 1,
             prev_hash: st.tip_hash.clone(),
             timestamp: 1_700_000_400,
-            transactions: vec![coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1), s2],
+            transactions: vec![
+                coinbase(a.public_key.bytes.clone(), 50, st.tip_height + 1),
+                s2,
+            ],
             nonce: 0,
         };
         let blk2 = mine_block(blk2, D, 10_000_000).unwrap();
