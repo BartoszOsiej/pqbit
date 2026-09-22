@@ -806,6 +806,81 @@ pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetEr
     }
 }
 
+// ---------------------------------------------------------------------------
+// status HTTP endpoint (explorer-lite, Q1)
+// ---------------------------------------------------------------------------
+
+/// Minimal read-only status endpoint for operators and the future explorer:
+/// `GET /status` returns one JSON object with chain health; anything else is a
+/// 404. std-only — the JSON is hand-rolled (per repo rules), the surface is
+/// deliberately tiny: no paths beyond /status, no methods beyond GET-by-lenience,
+/// connection closes after one response.
+pub fn status_server(listener: TcpListener, state: NodeState) -> std::io::Result<()> {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut s) => {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let _ = handle_status_conn(&mut s, &state);
+                });
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok(())
+}
+
+fn handle_status_conn(stream: &mut TcpStream, state: &NodeState) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
+    // read the request head (we only need the path); stop at end of headers
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8192 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let path = head.split_whitespace().nth(1).unwrap_or("");
+    let (code, body) = if path == "/status" || path == "/status/" {
+        let chain = state.chain.lock().expect("chain poisoned");
+        let pool = state.pool.lock().expect("pool poisoned");
+        let store = state.blocks.lock().expect("store poisoned");
+        let book = state.book.lock().expect("book poisoned");
+        (
+            "200 OK",
+            format!(
+                "{{\"magic\":\"PQBT\",\"wire_version\":{},\"tip_height\":{},\"tip_hash\":\"{}\",\"total_supply\":{},\"difficulty\":{},\"mempool_size\":{},\"blocks_stored\":{},\"peers_known\":{},\"sig_algo\":\"ML-DSA-44\",\"status\":\"ok\"}}",
+                VERSION,
+                chain.tip_height,
+                chain.tip_hash,
+                chain.total_supply,
+                chain.difficulty,
+                pool.len(),
+                store.len(),
+                book.len(),
+            ),
+        )
+    } else {
+        ("404 Not Found", "{{\"error\":\"not found\"}}".to_string())
+    };
+    let resp = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        code,
+        body.len(),
+        body
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()
+}
+
 /// Bind + accept loop (one thread per connection).
 pub fn serve(listener: TcpListener, state: NodeState) -> std::io::Result<()> {
     for stream in listener.incoming() {
@@ -1308,6 +1383,36 @@ mod tests {
         assert!(rl.allow("10.0.0.3", 1_002));
         assert_eq!(rl.tracked(), 2);
         assert!(rl.allow("10.0.0.2", 1_003), "recent peer still tracked");
+    }
+
+    #[test]
+    fn status_endpoint_serves_json_and_404() {
+        let (st, blocks) = mined_chain(2);
+        let node = node_with(st, blocks, "127.0.0.1:1");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            let _ = status_server(listener, node);
+        });
+
+        let get = |path: &str| {
+            let mut c = TcpStream::connect(&addr).expect("dial");
+            use std::io::Write as _;
+            write!(c, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut out = String::new();
+            use std::io::Read as _;
+            c.read_to_string(&mut out).unwrap();
+            out
+        };
+
+        let resp = get("/status");
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("\"tip_height\":2"));
+        assert!(resp.contains("\"sig_algo\":\"ML-DSA-44\""));
+        assert!(resp.contains("\"status\":\"ok\""));
+
+        let miss = get("/nope");
+        assert!(miss.starts_with("HTTP/1.1 404 Not Found"));
     }
 
     #[test]

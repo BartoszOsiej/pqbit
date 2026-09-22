@@ -121,6 +121,9 @@ enum Cmd {
         /// Persistent peer store file (addr book survives restarts)
         #[arg(long = "peers-file")]
         peers_file: Option<String>,
+        /// Serve a read-only JSON status endpoint on 127.0.0.1:PORT (explorer-lite)
+        #[arg(long = "status-port")]
+        status_port: Option<u16>,
         /// Gossip interval in seconds
         #[arg(long, default_value_t = 10)]
         interval: u64,
@@ -471,6 +474,7 @@ key signs spends. Re-run with --write to store as files."
             dump_utxos,
             extended,
             peers_file,
+            status_port,
         } => {
             println!("pqbit-node :: p2p peer (phase 3 — gossip: addr exchange + push/pull)");
             println!(
@@ -584,6 +588,17 @@ key signs spends. Re-run with --write to store as files."
                 let stop2 = Arc::clone(&stop);
                 std::thread::spawn(move || {
                     net::gossiper_loop(s2, g, std::time::Duration::from_secs(interval), stop2);
+                });
+            }
+            if let Some(port) = status_port {
+                let sstat = state.clone();
+                let saddr = format!("127.0.0.1:{port}");
+                let sl = std::net::TcpListener::bind(&saddr).expect("bind status port");
+                println!("  status    : http://{saddr}/status");
+                std::thread::spawn(move || {
+                    if let Err(e) = net::status_server(sl, sstat) {
+                        eprintln!("pqbit-status: {e}");
+                    }
                 });
             }
             let listener = std::net::TcpListener::bind(&listen).expect("bind");
