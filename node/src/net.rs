@@ -69,6 +69,8 @@ pub enum NetError {
     UnknownMsg(u8),
     /// Peer sent a block our chain rejected (PQ/PoW/chaining).
     BadBlock(NodeError),
+    /// Connection rejected by inbound rate limiting.
+    RateLimited,
 }
 
 impl std::fmt::Display for NetError {
@@ -80,6 +82,7 @@ impl std::fmt::Display for NetError {
             NetError::BadMagic => write!(f, "peer magic mismatch"),
             NetError::UnknownMsg(k) => write!(f, "unknown message type 0x{k:02x}"),
             NetError::BadBlock(e) => write!(f, "peer sent invalid block: {e}"),
+            NetError::RateLimited => write!(f, "connection rate limited"),
         }
     }
 }
@@ -481,6 +484,89 @@ fn now_unix() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// inbound rate limiting (Q1 milestone)
+// ---------------------------------------------------------------------------
+
+/// Max inbound connections accepted per sliding window, per peer IP.
+/// Generous enough for our own gossip cadence (a 2 s interval is ~30 conns
+/// per minute) while stopping floods of hundreds.
+pub const MAX_CONN_PER_WINDOW: usize = 30;
+/// Sliding window length in seconds.
+pub const WINDOW_SECS: u64 = 60;
+/// Hard cap of tracked peer IPs (memory guard): beyond this the oldest-touched
+/// entry is evicted — an attacker cannot grow the map without talking, and
+/// talking is itself rate-limited.
+pub const MAX_TRACKED_PEERS: usize = 4096;
+
+/// Sliding-window inbound connection limiter, keyed by peer IP. Std-only,
+/// no dependencies; state is per node (each `NodeState` owns one).
+#[derive(Default)]
+pub struct RateLimiter {
+    /// peer ip -> timestamps (unix secs, ascending) of accepted connections
+    hits: HashMap<String, Vec<u64>>,
+    max_per_window: usize,
+    window_secs: u64,
+    max_tracked: usize,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self::with_limits(MAX_CONN_PER_WINDOW, WINDOW_SECS, MAX_TRACKED_PEERS)
+    }
+
+    /// Explicit limits (the knob tests — and a future config flag — turn).
+    pub fn with_limits(max_per_window: usize, window_secs: u64, max_tracked: usize) -> Self {
+        Self {
+            hits: HashMap::new(),
+            max_per_window,
+            window_secs,
+            max_tracked,
+        }
+    }
+
+    /// May this inbound connection be accepted? Lazily prunes the peer's
+    /// timestamps; evicts the oldest-touched peer when the map is full.
+    pub fn allow(&mut self, ip: &str, now: u64) -> bool {
+        let cutoff = now.saturating_sub(self.window_secs);
+        if let Some(ts) = self.hits.get_mut(ip) {
+            ts.retain(|&t| t > cutoff);
+            if ts.len() >= self.max_per_window {
+                return false;
+            }
+            ts.push(now);
+            return true;
+        }
+        if self.hits.len() >= self.max_tracked {
+            // evict the peer whose newest hit is oldest (least recently active)
+            if let Some(oldest) = self
+                .hits
+                .iter()
+                .min_by_key(|(_, ts)| ts.last().copied().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+            {
+                self.hits.remove(&oldest);
+            }
+        }
+        self.hits.insert(ip.to_string(), vec![now]);
+        true
+    }
+
+    /// How many IPs are currently tracked (observability / tests).
+    pub fn tracked(&self) -> usize {
+        self.hits.len()
+    }
+
+    /// Accepted-and-unexpired connection count for one IP (tests).
+    pub fn recent_hits(&self, ip: &str, now: u64) -> usize {
+        let cutoff = now.saturating_sub(self.window_secs);
+        self.hits
+            .get(ip)
+            .map(|ts| ts.iter().filter(|&&t| t > cutoff).count())
+            .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // node state
 // ---------------------------------------------------------------------------
 
@@ -502,6 +588,8 @@ pub struct NodeState {
     pub pool: Arc<Mutex<Mempool>>,
     /// Coinbase paying key (mining + announce identity).
     pub miner_key: Arc<Vec<u8>>,
+    /// Inbound connection limiter (per node).
+    pub rate: Arc<Mutex<RateLimiter>>,
 }
 
 impl NodeState {
@@ -621,6 +709,18 @@ impl NodeState {
 /// Serve one connection: handshake, then answer Ping / GetBlocks / GetAddr,
 /// merge announced addrs, and accept pushed blocks (validated) until EOF.
 pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetError> {
+    // inbound rate limit first: even a handshake flood burns one bucket entry
+    // per IP, not memory, and over-limit peers are dropped before any work
+    {
+        let peer_ip = stream
+            .peer_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default();
+        let mut lim = state.rate.lock().expect("rate poisoned");
+        if !lim.allow(&peer_ip, now_unix()) {
+            return Err(NetError::RateLimited);
+        }
+    }
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let m = read_message(&mut stream)?;
     if m.kind != MSG_HANDSHAKE {
@@ -714,7 +814,11 @@ pub fn serve(listener: TcpListener, state: NodeState) -> std::io::Result<()> {
                 let state = state.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_conn(s, &state) {
-                        eprintln!("pqbit-net: peer dropped: {e}");
+                        if !matches!(e, NetError::RateLimited) {
+                            eprintln!("pqbit-net: peer dropped: {e}");
+                        }
+                        // rate-limited peers are dropped silently: refusing to
+                        // talk to floods is policy, not an error worth logging
                     }
                 });
             }
@@ -1052,6 +1156,7 @@ mod tests {
             book: Arc::new(Mutex::new(AddrBook::new())),
             pool: Arc::new(Mutex::new(Mempool::new())),
             miner_key: Arc::new(vec![0xAB; 1312]),
+            rate: Arc::new(Mutex::new(RateLimiter::new())),
         }
     }
 
@@ -1171,6 +1276,70 @@ mod tests {
         assert!(book.merge("1.1.1.1:1", 1));
         book.flush(); // no-op without a persist path
         assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn rate_limiter_allows_then_floods_fail() {
+        let mut rl = RateLimiter::with_limits(3, 60, 1024);
+        assert!(rl.allow("10.0.0.1", 1_000));
+        assert!(rl.allow("10.0.0.1", 1_001));
+        assert!(rl.allow("10.0.0.1", 1_002));
+        assert!(
+            !rl.allow("10.0.0.1", 1_003),
+            "4th conn inside window must fail"
+        );
+        assert_eq!(rl.recent_hits("10.0.0.1", 1_004), 3);
+        // another peer is unaffected (per-IP buckets)
+        assert!(rl.allow("10.0.0.2", 1_005));
+        // window slides: old hits expire, the IP is fine again
+        assert!(
+            rl.allow("10.0.0.1", 1_000 + 61),
+            "window passed: allowed again"
+        );
+        assert_eq!(rl.recent_hits("10.0.0.1", 1_062), 1);
+    }
+
+    #[test]
+    fn rate_limiter_evicts_stale_peers() {
+        let mut rl = RateLimiter::with_limits(10, 60, 2);
+        assert!(rl.allow("10.0.0.1", 1_000));
+        assert!(rl.allow("10.0.0.2", 1_001));
+        // 3rd peer evicts the least-recently-active one (10.0.0.1)
+        assert!(rl.allow("10.0.0.3", 1_002));
+        assert_eq!(rl.tracked(), 2);
+        assert!(rl.allow("10.0.0.2", 1_003), "recent peer still tracked");
+    }
+
+    #[test]
+    fn rate_limited_inbound_conn_is_rejected() {
+        // live: 2-conn limiter; the 3rd inbound connection from 127.0.0.1 is
+        // dropped before handshake by handle_conn itself
+        let st = node_with(ChainState::new(D), Vec::new(), "127.0.0.1:1");
+        *st.rate.lock().unwrap() = RateLimiter::with_limits(2, 60, 1024);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                let st = st.clone();
+                std::thread::spawn(move || {
+                    let _ = handle_conn(s, &st); // errors expected on the 3rd
+                });
+            }
+        });
+        let dial = |s: &str, hs: bool| {
+            let mut c = TcpStream::connect(s).expect("dial");
+            if hs {
+                write_message(&mut c, MSG_HANDSHAKE, &encode_handshake(MAGIC, VERSION, 0)).unwrap();
+                let _ = read_message(&mut c).unwrap();
+            }
+        };
+        dial(&addr, true); // 1 ok
+        dial(&addr, true); // 2 ok
+                           // 3rd: connect succeeds (kernel), but no handshake reply ever comes
+        let mut c = TcpStream::connect(&addr).expect("dial");
+        write_message(&mut c, MSG_HANDSHAKE, &encode_handshake(MAGIC, VERSION, 0)).unwrap();
+        let res = read_message(&mut c);
+        assert!(res.is_err(), "rate-limited conn must not get a handshake");
     }
 
     #[test]

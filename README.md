@@ -52,14 +52,14 @@ $ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
 
 **Phase 3 (in progress): peer-to-peer — length-prefixed framing with a 4 MiB cap, magic/version handshake, Ping/Pong liveness, full-block pull sync, and now **gossip**: an addr manager (`GETADDR`/`ADDR` + self-announcement, so one seed reveals the mesh) and push/pull relay — `pqbit-node serve --seed host:port` mines a local chain, then exchanges addr books and blocks with peers on a timer: pull when they are taller, push when we are. Every arriving block goes through the full PQ chain validation before it touches our tip. A bounded mempool (4096 txs, FIFO eviction, duplicate/conflict protection, read-only ML-DSA validation before admission) now feeds the miner: `serve` packs pooled spends into new blocks on top of the coinbase, `--keep-mining` mints continuously, and gossip rounds now relay mempool transactions too (TX/GETMEMPOOL/MEMPOOL) — chain sync always precedes mempool sync, because a spend can only validate once its prevout exists. 21 tests incl. an end-to-end two-node convergence test; std-only, no new dependencies). Wire spec is the code: explicit field-order codecs in `node/src/net.rs`.
 
-**Mining no longer starves the network:** the PoW loop runs lock-free (template snapshotted under a short lock, result re-validated against a possibly-moved tip). **Fork choice is in: longest-chain reorg (v1).** A same-height sibling is stashed; when a taller branch is fully known it wins by replay from genesis, orphaned blocks' txs return to the mempool (27 tests incl. a fork/reorg scenario). **Persistent peer store is in:** `serve --peers-file peers.txt` loads known peers at boot and atomically flushes merges after every gossip round — a restart re-discovers the mesh from disk alone (live proof: a node with zero seeds pulled blocks from a peer it knew only from the file). **Next:** rate limiting, explorer, whitepaper. Found a real bug with us: the first coinbase design collided txids across blocks (height lived in the uncommitted signature field) — caught by the double-spend test, fixed by committing height in the prevout.
+**Mining no longer starves the network:** the PoW loop runs lock-free (template snapshotted under a short lock, result re-validated against a possibly-moved tip). **Fork choice is in: longest-chain reorg (v1).** A same-height sibling is stashed; when a taller branch is fully known it wins by replay from genesis, orphaned blocks' txs return to the mempool (30 tests incl. a fork/reorg scenario). **Persistent peer store is in:** `serve --peers-file peers.txt` loads known peers at boot and atomically flushes merges after every gossip round — a restart re-discovers the mesh from disk alone (live proof: a node with zero seeds pulled blocks from a peer it knew only from the file). **Inbound rate limiting is in:** a per-peer-IP sliding-window limiter (30 conns/min default, hard cap on tracked peers) drops handshake floods before they touch any state — the third connection from a flooding IP never sees a handshake reply (30 tests incl. a live flood-rejection test). **Next:** explorer, whitepaper. Found a real bug with us: the first coinbase design collided txids across blocks (height lived in the uncommitted signature field) — caught by the double-spend test, fixed by committing height in the prevout.
 
 ## Quick start
 
 ```bash
 git clone https://github.com/BartoszOsiej/pqbit
 cd pqbit
-cargo test --release          # 27 tests: core, chain, p2p, mempool, wallet cycle
+cargo test --release          # 30 tests: core, chain, p2p, rate limit, mempool, wallet cycle
 
 # generate a wallet (payout address + signing key):
 cargo run -p pqbit --bin pqbit-node -- wallet --write
@@ -101,7 +101,7 @@ privilege beyond a ≤100-coin stash that can never be spent (see
 
 ## Verification
 
-All 27 tests pass in CI on every push (unit, chain, wire-codec, gossip
+All 30 tests pass in CI on every push (unit, chain, wire-codec, gossip
 convergence, mempool relay, fork-choice reorg). Run locally:
 
 ```bash

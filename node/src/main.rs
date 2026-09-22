@@ -540,6 +540,7 @@ key signs spends. Re-run with --write to store as files."
                 })),
                 pool: std::sync::Arc::new(std::sync::Mutex::new(mempool::Mempool::new())),
                 miner_key: Arc::new(payout_pk.clone()),
+                rate: std::sync::Arc::new(std::sync::Mutex::new(net::RateLimiter::new())),
             };
             if let Some(path) = &dump_utxos {
                 use std::io::Write;
