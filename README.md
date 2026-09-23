@@ -8,7 +8,7 @@ Part of [Hartwell Labs](https://bartoszosiej.github.io/) · Founder: Bartosz Osi
 [![Rust](https://img.shields.io/badge/Rust-1.97+-DEA584?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![CI](https://github.com/BartoszOsiej/pqbit/actions/workflows/ci.yml/badge.svg)](https://github.com/BartoszOsiej/pqbit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-9%20passing-brightgreen?style=flat-square)](#verification)
+[![Tests](https://img.shields.io/badge/tests-35%20passing-brightgreen?style=flat-square)](#verification)
 
 ## Why
 
@@ -35,7 +35,7 @@ Not "a faster Bitcoin". Not "a better store of value". One thesis, executed clea
 
 - `pqbit-core` — quantum-resistant transaction model: TxIn/TxOut/Transaction, canonical sighash preimage, PQ signature verification via [bitcoinpqc](https://crates.io/crates/bitcoinpqc) (ML-DSA-44, SLH-DSA-SHA2-128s)
 - `pqbit-node` — testnet chain engine: blocks, SHA-256d PoW (leading-zero-bits difficulty), coinbase with height commitment, **UTXO set with ML-DSA spend authorization**, CLI miner
-- **9/9 tests** (core 4 + node 5): genesis mining, PoW rejection, valid PQ spend, tampered-signature rejection, double-spend impossibility
+- **Test suite 35/35 green** (core 4 + node 31): genesis mining, PoW rejection, valid PQ spend, tampered-signature rejection, double-spend impossibility, wire codecs, gossip convergence, mempool relay, fork-choice reorg, rate limiting, live flood rejection
 - [GENESIS.md](GENESIS.md) — draft v0.1 of genesis parameters, open for public review
 
 Live demo (release build, difficulty 14):
@@ -59,7 +59,7 @@ $ pqbit-node mine --blocks 3 --difficulty 14 --reward 50
 ```bash
 git clone https://github.com/BartoszOsiej/pqbit
 cd pqbit
-cargo test --release          # 31 tests: core, chain, p2p, rate limit, status, mempool, wallet cycle
+cargo test --release          # 35 tests: core, chain, p2p, rate limit, status, mempool, wallet cycle
 
 # generate a wallet (payout address + signing key):
 cargo run -p pqbit --bin pqbit-node -- wallet --write
@@ -101,7 +101,7 @@ privilege beyond a ≤100-coin stash that can never be spent (see
 
 ## Verification
 
-All 31 tests pass in CI on every push (unit, chain, wire-codec, gossip
+All 35 tests pass in CI on every push (unit, chain, wire-codec, gossip
 convergence, mempool relay, fork-choice reorg). Run locally:
 
 ```bash
