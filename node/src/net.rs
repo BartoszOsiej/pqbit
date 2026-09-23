@@ -810,6 +810,70 @@ pub fn handle_conn(mut stream: TcpStream, state: &NodeState) -> Result<(), NetEr
 // status HTTP endpoint (explorer-lite, Q1)
 // ---------------------------------------------------------------------------
 
+/// Static single-file explorer dashboard served at `/`.
+/// Fetches `/status` client-side; renders chain health. All markup is static
+/// (values inserted via textContent — no HTML injection surface). Dark theme,
+/// monospace, no external assets — works offline on a headless box.
+const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pqbit explorer</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box;margin:0}
+  body{background:#0b0e11;color:#d7dce3;font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+  .wrap{width:100%;max-width:640px}
+  h1{font-size:19px;font-weight:600;letter-spacing:.04em;margin-bottom:2px}
+  h1 span{color:#f7931a}
+  .sub{color:#7d8894;font-size:12px;margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .card{background:#12161b;border:1px solid #1f262e;padding:14px 16px}
+  .card.wide{grid-column:1/-1}
+  .k{color:#7d8894;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  .v{font-size:21px;font-weight:600;margin-top:4px;word-break:break-all}
+  .v.sm{font-size:13px;font-weight:400}
+  .ok{color:#4cc38a}.bad{color:#e5534b}
+  footer{color:#5b6673;font-size:11px;margin-top:18px;text-align:center}
+  a{color:#f7931a;text-decoration:none}
+</style></head><body><div class="wrap">
+<h1>pqbit <span>explorer</span></h1>
+<div class="sub">post-quantum Bitcoin - testnet node status (auto-refresh 5s)</div>
+<div class="grid">
+  <div class="card"><div class="k">Tip height</div><div class="v" id="height">-</div></div>
+  <div class="card"><div class="k">Total supply</div><div class="v" id="supply">-</div></div>
+  <div class="card"><div class="k">Difficulty (leading zero bits)</div><div class="v" id="difficulty">-</div></div>
+  <div class="card"><div class="k">Mempool size</div><div class="v" id="mempool">-</div></div>
+  <div class="card"><div class="k">Peers known</div><div class="v" id="peers">-</div></div>
+  <div class="card"><div class="k">Blocks stored</div><div class="v" id="blocks">-</div></div>
+  <div class="card wide"><div class="k">Tip hash</div><div class="v sm" id="hash">-</div></div>
+  <div class="card wide"><div class="k">Signature algorithm</div><div class="v sm">ML-DSA-44 (FIPS 204) - no ECDSA fallback</div></div>
+  <div class="card wide"><div class="k">Node status</div><div class="v sm" id="node">connecting...</div></div>
+</div>
+<footer>pqbit - quantum-resistant from genesis - <a href="/status">raw JSON</a></footer>
+<script>
+function set(k,v){document.getElementById(k).textContent=v}
+async function refresh(){
+  try{
+    const r=await fetch('/status');
+    if(!r.ok)throw 0;
+    const j=await r.json();
+    set('height',j.tip_height);set('supply',j.total_supply);
+    set('difficulty',j.difficulty);set('mempool',j.mempool_size);
+    set('peers',j.peers_known);set('blocks',j.blocks_stored);
+    set('hash',j.tip_hash);
+    const n=document.getElementById('node');
+    n.textContent=j.status==='ok'?'ok - serving':'degraded';
+    n.className='v sm '+(j.status==='ok'?'ok':'bad');
+  }catch(e){
+    const n=document.getElementById('node');
+    n.textContent='unreachable';n.className='v sm bad';
+  }
+}
+refresh();setInterval(refresh,5000);
+</script></div></body></html>
+"#;
+
 /// Minimal read-only status endpoint for operators and the future explorer:
 /// `GET /status` returns one JSON object with chain health; anything else is a
 /// 404. std-only — the JSON is hand-rolled (per repo rules), the surface is
@@ -849,6 +913,20 @@ fn handle_status_conn(stream: &mut TcpStream, state: &NodeState) -> std::io::Res
     }
     let head = String::from_utf8_lossy(&buf);
     let path = head.split_whitespace().nth(1).unwrap_or("");
+    // Explorer dashboard: a hand-rolled single-file HTML page served at `/`.
+    // It fetches `/status` client-side and renders chain health. Same tiny
+    // surface rules as the JSON endpoint: GET-by-lenience, one response,
+    // connection closed. Everything below is static bytes — no templating,
+    // no client data reflected (XSS-safe by construction).
+    if path == "/" || path == "/index.html" || path == "/explorer" {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            EXPLORER_HTML.len(),
+            EXPLORER_HTML
+        );
+        stream.write_all(resp.as_bytes())?;
+        return stream.flush();
+    }
     let (code, body) = if path == "/status" || path == "/status/" {
         let chain = state.chain.lock().expect("chain poisoned");
         let pool = state.pool.lock().expect("pool poisoned");
