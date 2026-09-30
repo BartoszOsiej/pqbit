@@ -129,10 +129,10 @@ pqbit is the flagship research project of **Hartwell Labs**:
 | Project | What | Landing |
 |---|---|---|
 | pqbit | Post-quantum Bitcoin | https://bartoszosiej.github.io/pqbit/ |
-| quantum-shield | ML-KEM-768 file encryption (pqguard) | https://bartoszosiej.github.io/quantum-shield/ |
-| fortis | Post-quantum measured boot | https://bartoszosiej.github.io/fortis/ |
-| talus-process-monitor | eBPF ransomware detect & respond | https://bartoszosiej.github.io/talus-process-monitor/ |
-| externum | Language compiling to Python/Bash/bytecode | https://bartoszosiej.github.io/externum/ |
+| quantum-shield | ML-KEM-768 file encryption (pqguard) | https://hartwell-labs.pl/quantum-shield/ |
+| fortis | Post-quantum measured boot | https://hartwell-labs.pl/fortis/ |
+| talus-process-monitor | eBPF ransomware detect & respond | https://hartwell-labs.pl/talus-process-monitor/ |
+| externum | Language compiling to Python/Bash/bytecode | https://hartwell-labs.pl/externum/ |
 | NV2_ENGINE | Voxel engine, neural terrain | https://bartoszosiej.github.io/NV2_ENGINE/ |
 | Docs | Full documentation hub (Fumadocs) | https://bartoszosiej.github.io/Docs/ |
 

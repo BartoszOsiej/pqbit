@@ -15,22 +15,22 @@ Genesis draft: https://github.com/BartoszOsiej/pqbit/blob/master/GENESIS.md
 ### talus-process-monitor
 eBPF ransomware detection & response for Linux (Rust + eBPF): sliding-window heuristics over syscalls, automated SIGKILL response, 280k events/s at ~7.6% CPU.
 Repo: https://github.com/BartoszOsiej/talus-process-monitor
-Landing: https://bartoszosiej.github.io/talus-process-monitor/
+Landing: https://hartwell-labs.pl/talus-process-monitor/
 
 ### quantum-shield
 Post-quantum file encryption CLI (pqguard): ML-KEM-768 (FIPS 203) + AES-256-GCM, fuzz-tested.
 Repo: https://github.com/BartoszOsiej/quantum-shield
-Landing: https://bartoszosiej.github.io/quantum-shield/
+Landing: https://hartwell-labs.pl/quantum-shield/
 
 ### fortis
 Post-quantum measured boot for Linux.
 Repo: https://github.com/BartoszOsiej/fortis
-Landing: https://bartoszosiej.github.io/fortis/
+Landing: https://hartwell-labs.pl/fortis/
 
 ### externum
 Programming language that compiles to Python, standalone Bash, and bytecode. Self-hosted, ~379 tests, browser REPL.
 Repo: https://github.com/BartoszOsiej/externum
-Playground: https://bartoszosiej.github.io/externum/
+Playground: https://hartwell-labs.pl/externum/
 
 ### NV2_ENGINE
 Rust voxel engine (wgpu) with MeMLP neural terrain from NASA real-climate data. Powers Vivia: Beyond The Known.
@@ -40,12 +40,12 @@ Landing: https://bartoszosiej.github.io/NV2_ENGINE/
 ### linux-aegis
 Linux security module.
 Repo: https://github.com/BartoszOsiej/linux-aegis
-Landing: https://bartoszosiej.github.io/linux-aegis/
+Landing: https://hartwell-labs.pl/linux-aegis/
 
 ### Aurora
 OS in the browser.
 Repo: https://github.com/BartoszOsiej/Aurora
-Landing: https://bartoszosiej.github.io/Aurora/
+Landing: https://hartwell-labs.pl/Aurora/
 
 ### The Stitcher Trilogy
 Crime horror novels by Bartosz Osiej, published on Amazon Kindle.
