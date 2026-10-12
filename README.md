@@ -1,3 +1,15 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/BartoszOsiej/BartoszOsiej/stats/svg/banner-dark.svg" />
+  <img alt="Bartosz Osiej — systems developer, Hartwell Labs" src="https://raw.githubusercontent.com/BartoszOsiej/BartoszOsiej/stats/svg/banner-light.svg" width="100%" />
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/BartoszOsiej/BartoszOsiej/stats/svg/rule-dark.svg" />
+  <img alt="" src="https://raw.githubusercontent.com/BartoszOsiej/BartoszOsiej/stats/svg/rule-light.svg" width="100%" />
+</picture>
+
+<!-- self-hosted animated header: https://github.com/BartoszOsiej/BartoszOsiej -->
+
 # pqbit — Post-Quantum Bitcoin
 
 > **Bitcoin as it would be designed in 2026, with fifteen years of hindsight:**
