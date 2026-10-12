@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "pqbit"
+abstract: "Post-quantum Bitcoin from genesis: a fair-launch UTXO chain using only NIST post-quantum signatures (ML-DSA-44 / SLH-DSA, FIPS 204/205), with a gossiping p2p network and PQ-validated mempool."
+type: software
+authors:
+  - family-names: Osiej
+    given-names: Bartosz
+    affiliation: "Hartwell Labs"
+    website: "https://hartwell-labs.pl"
+repository-code: "https://github.com/BartoszOsiej/pqbit"
+url: "https://BartoszOsiej.github.io/pqbit/"
+license: MIT
+keywords:
+  - bitcoin
+  - post-quantum
+  - cryptography
+  - blockchain
+  - p2p
+  - rust
+version: "0.1.0"
+date-released: "2026-10-12"
